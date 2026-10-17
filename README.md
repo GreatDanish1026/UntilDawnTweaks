@@ -5,7 +5,7 @@ DirectX 12). The game's ray tracing is compiled in and switched on, but its own 
 keep it from showing: most lights opt out of RT shadows, and reflections are limited to
 mirror-like surfaces in curated areas. See [docs/FINDINGS.md](docs/FINDINGS.md).
 
-**Status: 0.0.2, phase 0 probe.** It confirms the console variable layout, shows the ray
+**Status: 0.0.3, phase 0 probe.** It confirms the console variable layout, shows the ray
 tracing work the GPU does each frame, and lets you force these cvars live:
 
 - **Enhanced RT mode** (`r.RayTracing.Enable.BMEnhancedMode`): 0 off, 1 lights marked

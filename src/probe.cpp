@@ -589,14 +589,37 @@ const wchar_t* const kWatched[] = {
     L"r.BM.AllowVirtualShadowMapsMode", L"r.RayTracing.ForceAllRayTracingEffects", L"r.RayTracing.Shadows.Lights.Spot",
 };
 
+// Width of a radio button or checkbox with this label.
+float ToggleWidth(const char* label) {
+    return ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(label, nullptr, true).x;
+}
+
+// SameLine, or a new line if an item this wide wouldn't fit in the rest of the column.
+void SameLineIfFits(float width) {
+    float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    ImGui::SameLine();
+    if (ImGui::GetCursorScreenPos().x + width > right) ImGui::NewLine();
+}
+
+// Width of the widest of these strings, for a fixed-width label column.
+float WidestText(const std::vector<std::string>& texts) {
+    float w = 0;
+    for (const std::string& t : texts) w = std::max(w, ImGui::CalcTextSize(t.c_str()).x);
+    return w;
+}
+
+// One row of the switches table: label | controls | the renderer's value.
 void DrawOverride(Override& o) {
     ImGui::PushID(o.cvar);
     Reading r = o.var || Resolve(o) ? Read(o.var) : Reading{};
+    ImGui::TableNextColumn();
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(o.label);
     ImGui::SetItemTooltip("%s\n\n%s", Narrow(o.cvar).c_str(), o.help);
-    ImGui::SameLine(220);
+    ImGui::TableNextColumn();
     if (o.missing) {
         ImGui::TextDisabled("not in this build");
+        ImGui::TableNextColumn();
         ImGui::PopID();
         return;
     }
@@ -613,22 +636,22 @@ void DrawOverride(Override& o) {
         ImGui::SameLine();
         if (!o.wanted) ImGui::BeginDisabled();
         float v = o.wanted ? o.value : static_cast<float>(game);
-        ImGui::SetNextItemWidth(220);
+        ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x, ImGui::GetFontSize() * 6));
         if (ImGui::SliderFloat("##v", &v, o.min, o.max, o.wanted ? "%.2f" : "game: %.2f")) o.value = v;
         if (!o.wanted) ImGui::EndDisabled();
     } else {
         if (ImGui::RadioButton(gameLabel, !o.wanted)) o.wanted = false;
         for (const Choice& c : o.choices) {
-            ImGui::SameLine();
+            SameLineIfFits(ToggleWidth(c.label));
             if (ImGui::RadioButton(c.label, o.wanted && lroundf(o.value) == c.value)) {
                 o.wanted = true;
                 o.value = static_cast<float>(c.value);
             }
         }
     }
-    ImGui::SameLine();
-    if (r.ok)
-        ImGui::TextDisabled("renderer: %g", r.render);
+    ImGui::TableNextColumn();
+    ImGui::AlignTextToFramePadding();
+    if (r.ok) ImGui::TextDisabled("renderer: %g", r.render);
     ImGui::PopID();
 }
 
@@ -643,11 +666,23 @@ void DrawOverlay(effect_runtime*) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "A different game build than the one analysed: see the log.");
 
     ImGui::SeparatorText("Ray tracing switches");
-    for (Override& o : g_overrides) DrawOverride(o);
+    if (ImGui::BeginTable("##switches", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+        std::vector<std::string> labels;
+        for (const Override& o : g_overrides) labels.push_back(o.label);
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, WidestText(labels));
+        ImGui::TableSetupColumn("controls", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("renderer", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("renderer: -0.000000").x);
+        for (Override& o : g_overrides) DrawOverride(o);
+        ImGui::EndTable();
+    }
     ImGui::TextDisabled("Session only: nothing is forced when the game starts.");
 
     ImGui::SeparatorText("Related values (renderer's copy)");
     if (ImGui::BeginTable("##watched", 2, ImGuiTableFlags_SizingFixedFit)) {
+        std::vector<std::string> names;
+        for (const wchar_t* name : kWatched) names.push_back(Narrow(name));
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, WidestText(names));
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
         for (const wchar_t* name : kWatched) {
             void* var = cvars::FindVariable(g_manager, name);
             Reading r = var ? Read(var) : Reading{};
@@ -671,6 +706,9 @@ void DrawOverlay(effect_runtime*) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "No rays dispatched (%u RT pipelines created so far)",
                                g_rtPipelines);
         } else if (ImGui::BeginTable("##rays", 3, ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("count", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("00000 x").x);
+            ImGui::TableSetupColumn("size", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("0000x0000").x);
+            ImGui::TableSetupColumn("names", ImGuiTableColumnFlags_WidthStretch);
             for (auto& [handle, st] : g_lastDispatches) {
                 ImGui::TableNextColumn();
                 ImGui::Text("%u x", st.count);
