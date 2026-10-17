@@ -1,0 +1,32 @@
+// Version resource for UntilDawnRT.addon64 (see version.h).
+#include <winver.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     UDRT_VERSION_MAJOR, UDRT_VERSION_MINOR, UDRT_VERSION_PATCH, 0
+PRODUCTVERSION  UDRT_VERSION_MAJOR, UDRT_VERSION_MINOR, UDRT_VERSION_PATCH, 0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      UDRT_PRODUCT
+            VALUE "FileDescription",  UDRT_RC_DESCRIPTION
+            VALUE "FileVersion",      UDRT_VERSION
+            VALUE "InternalName",     UDRT_PRODUCT
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Scott Dinwiddie. MIT License."
+            VALUE "OriginalFilename", UDRT_RC_FILENAME
+            VALUE "ProductName",      UDRT_RC_PRODUCT
+            VALUE "ProductVersion",   UDRT_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,0 +1,564 @@
+// UntilDawnRT phase 0: a ReShade add-on that checks the console variable layout in Until
+// Dawn (UE 5) and lets you force the cvars that gate its ray tracing, live, from an overlay
+// tab. See docs/FINDINGS.md for why these three:
+//   r.RayTracing.Enable.BMEnhancedMode     which lights may cast RT shadows (0/1/2)
+//   r.BM.AllowRTReflections                RT reflections everywhere or only where allowed
+//   r.RayTracing.Reflections.MaxRoughness  the project ships 0.01: mirrors only
+//
+// What it records, next to the game executable:
+//   UntilDawnRT.log  the census (every cvar matching kPrefixes: type, kind, main and
+//                    renderer values, priority), the layout check, every override and
+//                    release, and later snapshots' changes (e.g. after a menu change)
+//
+// Overrides are session-only in phase 0: mode 2 is documented as very slow, so nothing is
+// forced at start.
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#define ImTextureID ImU64
+#include <imgui.h>
+#include <reshade.hpp>
+
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
+
+#include "cvars.hpp"
+#include "version.h"
+
+extern "C" __declspec(dllexport) const char* NAME = UDRT_PRODUCT;
+extern "C" __declspec(dllexport) const char* DESCRIPTION =
+    "Ray tracing probe for " UDRT_GAME " (DirectX 12): cvar layout check and live RT switches.";
+
+namespace {
+
+using namespace reshade::api;
+
+// ---------------------------------------------------------------- logging
+
+std::mutex g_mutex;  // present (RHI thread) and overlay (same thread, but be safe)
+FILE* g_log = nullptr;
+
+void Log(const char* fmt, ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (g_log) {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        fprintf(g_log, "%02u:%02u:%02u.%03u %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, buf);
+        fflush(g_log);
+    }
+}
+
+void OpenLog() {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    std::wstring dir(path, n);
+    dir.resize(dir.find_last_of(L"\\/") + 1);
+    std::wstring log = dir + L"" UDRT_PRODUCT ".log";
+    std::wstring prev = dir + L"" UDRT_PRODUCT ".prev.log";
+    // ReShade may load and unload the add-on more than once at startup, so only the
+    // first load in a process starts a new log.
+    if (GetEnvironmentVariableW(L"UDRT_LOG_OPEN", nullptr, 0) == 0) {
+        SetEnvironmentVariableW(L"UDRT_LOG_OPEN", L"1");
+        MoveFileExW(log.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+    g_log = _wfopen(log.c_str(), L"a");
+}
+
+std::string Narrow(const wchar_t* s) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
+    std::string out(n > 0 ? n - 1 : 0, '\0');
+    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, s, -1, out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+// ---------------------------------------------------------------- executable image
+
+// The build the layouts were read from (Bates-Win64-Shipping.exe with its PDB).
+constexpr uint32_t kKnownTimestamp = UDRT_KNOWN_PE_TIMESTAMP;
+
+const uint8_t* g_base = nullptr;
+uint32_t g_imageSize = 0;
+uint32_t g_timestamp = 0;
+cvars::Section g_text, g_rdata, g_data;
+
+void LogGameInfo() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    g_base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(g_base);
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(g_base + dos->e_lfanew);
+    g_imageSize = nt->OptionalHeader.SizeOfImage;
+    g_timestamp = nt->FileHeader.TimeDateStamp;
+    cvars::FindSection(g_base, ".text", g_text);
+    cvars::FindSection(g_base, ".rdata", g_rdata);
+    cvars::FindSection(g_base, ".data", g_data);
+    Log("%s %s", UDRT_PRODUCT, UDRT_VERSION);
+    Log("exe: %s", Narrow(path).c_str());
+    Log("exe: PE timestamp 0x%08x (%s), image size 0x%x, base %p", g_timestamp,
+        g_timestamp == kKnownTimestamp ? "the build the layouts come from" : "a different build than the layouts",
+        g_imageSize, g_base);
+}
+
+bool InSection(const cvars::Section& s, const void* p) {
+    auto b = static_cast<const uint8_t*>(p);
+    return s.begin && b >= s.begin && b < s.begin + s.size;
+}
+
+// "exe+0x1234 .data", "heap" for addresses outside the image.
+std::string Where(const void* p) {
+    auto b = static_cast<const uint8_t*>(p);
+    if (!g_base || b < g_base || b >= g_base + g_imageSize) return "heap";
+    const char* sec = InSection(g_text, p) ? " .text" : InSection(g_rdata, p) ? " .rdata" : InSection(g_data, p) ? " .data" : "";
+    char buf[48];
+    snprintf(buf, sizeof(buf), "exe+0x%llx%s", static_cast<unsigned long long>(b - g_base), sec);
+    return buf;
+}
+
+// ---------------------------------------------------------------- console manager
+
+void* g_manager = nullptr;
+std::string g_status = "waiting for the game";
+
+// The singleton's address once (a scan of .text), then waits for the engine to create the
+// manager. Called every frame until it succeeds.
+bool FindManager() {
+    static void** singleton = nullptr;
+    static bool searched = false;
+    if (g_manager) return true;
+    if (!searched) {
+        searched = true;
+        int votes = 0, matches = 0;
+        singleton = cvars::FindConsoleManagerSingleton(g_base, &votes, &matches);
+        if (!singleton) {
+            g_status = "IConsoleManager::Singleton not found";
+            Log("cvars: %s (no lea of L\"r.ScreenPercentage\" after mov rcx,[rip+x])", g_status.c_str());
+        } else {
+            Log("cvars: IConsoleManager::Singleton at %s (%d of %d matches agree)", Where(singleton).c_str(), votes,
+                matches);
+        }
+    }
+    if (!singleton || !*singleton) return false;
+    g_manager = *singleton;
+    Log("cvars: manager %p, vtable %s", g_manager, Where(*static_cast<void**>(g_manager)).c_str());
+    return true;
+}
+
+// ---------------------------------------------------------------- census and layout check
+
+// Names that start with these are looked up; the full names come from the exe's own
+// strings, so nothing is hard-coded.
+const wchar_t* const kPrefixes[] = {
+    L"r.RayTracing", L"r.BM.", L"r.bm.", L"r.ReflectionMethod", L"r.DynamicGlobalIlluminationMethod",
+    L"r.Shadow.Virtual.Enable", L"r.Lumen.Reflections.Allow", L"r.Lumen.HardwareRayTracing", L"r.D3D12.DXR",
+    L"r.SSR.Quality", L"r.AmbientOcclusion", L"r.Shadow.Denoiser", L"r.Reflections.Denoiser",
+};
+
+std::vector<std::wstring> CollectNames() {
+    std::set<std::wstring> names;
+    const uint8_t* p = g_rdata.begin;
+    const size_t n = g_rdata.size & ~size_t(1);
+    for (size_t i = 2; i + 4 <= n; i += 2) {
+        if (p[i] != 'r' || p[i + 1] != 0 || p[i + 2] != '.' || p[i + 3] != 0) continue;
+        if (p[i - 2] != 0 || p[i - 1] != 0) continue;  // must start a string
+        std::wstring s;
+        bool ok = true;
+        for (size_t j = i; j + 1 < n; j += 2) {
+            wchar_t c = static_cast<wchar_t>(p[j] | (p[j + 1] << 8));
+            if (c == 0) break;
+            if (!(iswalnum(c) || c == L'.' || c == L'_') || s.size() > 96) {
+                ok = false;
+                break;
+            }
+            s.push_back(c);
+        }
+        if (!ok) continue;
+        for (const wchar_t* prefix : kPrefixes)
+            if (s.compare(0, wcslen(prefix), prefix) == 0) {
+                names.insert(s);
+                break;
+            }
+    }
+    return {names.begin(), names.end()};
+}
+
+using GetFloatFn = float(__fastcall*)(void* self);
+
+// The engine's own GetFloat (+0x98). Off the game thread it returns the renderer's copy,
+// which is what the layout check compares against.
+bool EngineFloat(void* var, float& out) {
+    __try {
+        out = cvars::Virtual<GetFloatFn>(var, cvars::kGetFloat)(var);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+struct Reading {
+    bool ok = false;
+    cvars::Storage st;
+    double main = 0, render = 0;
+    uint32_t priority = 0;
+};
+
+Reading Read(void* var) {
+    Reading r;
+    r.ok = cvars::GetStorage(var, r.st) && cvars::ReadValue(r.st, r.st.main, r.main) &&
+           cvars::ReadValue(r.st, r.st.render, r.render);
+    r.priority = cvars::Flags(var) >> 24;
+    return r;
+}
+
+std::string Text(const Reading& r) {
+    if (!r.ok) return "unreadable";
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s %s | main %g / renderer %g | priority 0x%02x", cvars::TypeName(r.st.type),
+             r.st.ref ? "ref" : "data", r.main, r.render, r.priority);
+    return buf;
+}
+
+struct Snap {
+    std::wstring name;
+    std::string text;
+};
+std::vector<Snap> g_last;
+int g_snapshots = 0;
+int g_layoutOk = 0, g_layoutBad = 0, g_layoutSkipped = 0;
+
+void Snapshot() {
+    if (!FindManager()) return;
+    std::vector<Snap> now;
+    bool first = g_snapshots == 0;
+    if (first) Log("census: name | type kind | main / renderer | priority | object, vtable | engine GetFloat");
+    for (const std::wstring& name : CollectNames()) {
+        void* var = cvars::FindVariable(g_manager, name.c_str());
+        if (!var) continue;
+        Reading r = Read(var);
+        now.push_back({name, Text(r)});
+        if (!first) continue;
+        float engine = 0;
+        const char* check = "";
+        if (!r.ok) {
+            ++g_layoutSkipped;
+        } else if (EngineFloat(var, engine)) {
+            bool match = fabs(engine - r.render) < 1e-6 * (1 + fabs(r.render));
+            (match ? g_layoutOk : g_layoutBad)++;
+            check = match ? "matches" : "MISMATCH";
+        }
+        void* vtable = nullptr;
+        cvars::SafeCopy(&vtable, var, 8);
+        Log("  %-58s | %s | %s, %s | %g %s", Narrow(name.c_str()).c_str(), now.back().text.c_str(), Where(var).c_str(),
+            Where(vtable).c_str(), engine, check);
+    }
+    if (first) {
+        Log("census: %zu cvars; layout check: renderer value read by us vs the engine's GetFloat: %d match, %d "
+            "mismatch, %d not checked (strings)",
+            now.size(), g_layoutOk, g_layoutBad, g_layoutSkipped);
+    } else {
+        std::map<std::wstring, std::string> before;
+        for (const Snap& s : g_last) before[s.name] = s.text;
+        int changes = 0;
+        Log("snapshot %d: changes since the previous one", g_snapshots + 1);
+        for (const Snap& s : now) {
+            auto it = before.find(s.name);
+            if (it != before.end() && it->second == s.text) continue;
+            ++changes;
+            Log("  %s: %s -> %s", Narrow(s.name.c_str()).c_str(), it == before.end() ? "(new)" : it->second.c_str(),
+                s.text.c_str());
+        }
+        Log("snapshot %d: %d changed", g_snapshots + 1, changes);
+    }
+    g_last = std::move(now);
+    ++g_snapshots;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%zu cvars, %d snapshot%s; layout %d ok / %d mismatch", g_last.size(), g_snapshots,
+             g_snapshots == 1 ? "" : "s", g_layoutOk, g_layoutBad);
+    g_status = buf;
+}
+
+// ---------------------------------------------------------------- overrides
+
+// A control forces one cvar through IConsoleVariable::Set at ECVF_SetByConsole, which
+// outranks the game's menu (GameSetting) and ini defaults, then mirrors the value to the
+// renderer. Releasing restores the original priority and value, so the game is in charge
+// again.
+
+struct Choice {
+    int value;
+    const char* label;
+};
+
+struct Override {
+    const wchar_t* cvar;
+    const char* label;
+    const char* help;
+    std::vector<Choice> choices;  // empty: a float slider from min to max
+    float min = 0, max = 1;
+
+    bool wanted = false;  // the user wants it forced
+    float value = 0;      // to this
+    bool active = false;  // forced right now
+    float applied = 0;
+    void* var = nullptr;
+    bool missing = false;
+    std::wstring original;  // main value before we forced it
+    uint32_t originalFlags = 0;
+    uint32_t repairs = 0;
+};
+
+std::vector<Override> g_overrides;
+
+void DefineOverrides() {
+    g_overrides = {
+        {L"r.RayTracing.Enable.BMEnhancedMode", "Enhanced RT mode",
+         "Ballistic Moon's gate on which lights may cast ray traced shadows (and on RT in reflections and sky light).\n"
+         "0: lights marked Disabled (the project default) and Enhanced-only get none\n"
+         "1: Enhanced-only lights get RT shadows too\n"
+         "2: every light, whatever its setting (the help text warns: very slow)",
+         {{0, "0 Off"}, {1, "1 Enhanced"}, {2, "2 Everywhere"}}},
+        {L"r.BM.AllowRTReflections", "Allow RT reflections",
+         "Ballistic Moon's reflection setting.\n0: always off\n1: on in areas where supported",
+         {{0, "0 Off"}, {1, "1 Where supported"}}},
+        {L"r.RayTracing.Reflections.MaxRoughness", "Reflections max roughness",
+         "Surfaces rougher than this skip ray traced reflections. The project ships 0.01 (mirrors only); UE's default "
+         "is 0.6.",
+         {}, 0.0f, 1.0f},
+    };
+}
+
+void* Resolve(Override& o) {
+    if (o.var || o.missing) return o.var;
+    o.var = cvars::FindVariable(g_manager, o.cvar);
+    if (!o.var) {
+        o.missing = true;
+        Log("override: %ls is not a cvar in this build", o.cvar);
+    }
+    return o.var;
+}
+
+std::wstring MainText(void* var) {
+    Reading r = Read(var);
+    wchar_t buf[32] = L"0";
+    if (r.ok && r.st.type == cvars::Type::Float)
+        swprintf(buf, 32, L"%g", r.main);
+    else if (r.ok)
+        swprintf(buf, 32, L"%d", static_cast<int>(r.main));
+    return buf;
+}
+
+std::wstring ValueText(const Override& o, float v) {
+    wchar_t buf[32];
+    if (o.choices.empty())
+        swprintf(buf, 32, L"%g", v);
+    else
+        swprintf(buf, 32, L"%d", static_cast<int>(lroundf(v)));
+    return buf;
+}
+
+void ApplyOverrides() {
+    for (Override& o : g_overrides) {
+        if (o.wanted == o.active && (!o.wanted || o.value == o.applied)) continue;
+        if (!Resolve(o)) {
+            o.wanted = false;
+            continue;
+        }
+        std::string before = Text(Read(o.var));
+        if (o.wanted) {
+            if (!o.active) {  // first time: remember what the game had
+                o.originalFlags = cvars::Flags(o.var);
+                o.original = MainText(o.var);
+            }
+            std::wstring text = ValueText(o, o.value);
+            bool ok = cvars::Set(o.var, text.c_str(), cvars::kSetByConsole) && cvars::MirrorToRenderer(o.var);
+            Log("override: %ls = %ls%s: %s -> %s", o.cvar, text.c_str(), ok ? "" : " (Set or mirror failed)",
+                before.c_str(), Text(Read(o.var)).c_str());
+            o.active = ok;
+            o.applied = o.value;
+            if (!ok) o.wanted = false;
+        } else {
+            // Back to the game's priority first, or Set would refuse the lower one.
+            cvars::Flags(o.var) = o.originalFlags;
+            bool ok = cvars::Set(o.var, o.original.c_str(), o.originalFlags & 0xff000000) && cvars::MirrorToRenderer(o.var);
+            Log("override: %ls released to %ls%s: %s -> %s", o.cvar, o.original.c_str(),
+                ok ? "" : " (Set or mirror failed)", before.c_str(), Text(Read(o.var)).c_str());
+            o.active = false;
+        }
+    }
+}
+
+// Puts a forced value back if something changed it (it shouldn't, given the priority).
+void CheckOverrides() {
+    for (Override& o : g_overrides) {
+        if (!o.active) continue;
+        Reading r = Read(o.var);
+        if (r.ok && fabs(r.render - o.applied) < 1e-5 && fabs(r.main - o.applied) < 1e-5) continue;
+        if (++o.repairs <= 5)
+            Log("override: %ls changed behind our back: %s; setting it again%s", o.cvar, Text(r).c_str(),
+                o.repairs == 5 ? " (not logging further repairs)" : "");
+        cvars::Set(o.var, ValueText(o, o.applied).c_str(), cvars::kSetByConsole);
+        cvars::MirrorToRenderer(o.var);
+    }
+}
+
+// ---------------------------------------------------------------- events
+
+constexpr uint64_t kCensusFrame = 600;  // ~10 s in: plugins have registered their cvars by then
+uint64_t g_frames = 0;
+bool g_snapshotRequested = false;
+
+void OnInitDevice(device* dev) {
+    std::lock_guard lock(g_mutex);
+    Log("device created: %s", dev->get_api() == device_api::d3d12 ? "Direct3D 12" : "not Direct3D 12");
+}
+
+void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, const rect*) {
+    std::lock_guard lock(g_mutex);
+    ++g_frames;
+    if (g_frames == kCensusFrame || (g_snapshotRequested && g_frames > kCensusFrame)) {
+        g_snapshotRequested = false;
+        Snapshot();
+    }
+    if (FindManager()) {
+        ApplyOverrides();
+        if (g_frames % 60 == 0) CheckOverrides();
+    }
+}
+
+// ---------------------------------------------------------------- overlay
+
+// Related cvars shown read-only, so a menu change can be seen without a snapshot.
+const wchar_t* const kWatched[] = {
+    L"r.RayTracing.Enable",       L"r.RayTracing.Shadows",           L"r.RayTracing.Reflections",
+    L"r.RayTracing.AmbientOcclusion", L"r.ReflectionMethod",         L"r.Shadow.Virtual.Enable",
+    L"r.BM.AllowVirtualShadowMapsMode", L"r.RayTracing.ForceAllRayTracingEffects",
+};
+
+void DrawOverride(Override& o) {
+    ImGui::PushID(o.cvar);
+    Reading r = o.var || Resolve(o) ? Read(o.var) : Reading{};
+    ImGui::TextUnformatted(o.label);
+    ImGui::SetItemTooltip("%s\n\n%s", Narrow(o.cvar).c_str(), o.help);
+    ImGui::SameLine(220);
+    if (o.missing) {
+        ImGui::TextDisabled("not in this build");
+        ImGui::PopID();
+        return;
+    }
+    double game = o.active ? wcstod(o.original.c_str(), nullptr) : r.render;
+    char gameLabel[48];
+    snprintf(gameLabel, sizeof(gameLabel), "Game (%g)", game);
+    if (o.choices.empty()) {
+        bool on = o.wanted;
+        if (ImGui::Checkbox("##on", &on)) {
+            o.wanted = on;
+            if (on) o.value = static_cast<float>(game);
+        }
+        ImGui::SetItemTooltip("Override the game's value");
+        ImGui::SameLine();
+        if (!o.wanted) ImGui::BeginDisabled();
+        float v = o.wanted ? o.value : static_cast<float>(game);
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::SliderFloat("##v", &v, o.min, o.max, o.wanted ? "%.2f" : "game: %.2f")) o.value = v;
+        if (!o.wanted) ImGui::EndDisabled();
+    } else {
+        if (ImGui::RadioButton(gameLabel, !o.wanted)) o.wanted = false;
+        for (const Choice& c : o.choices) {
+            ImGui::SameLine();
+            if (ImGui::RadioButton(c.label, o.wanted && lroundf(o.value) == c.value)) {
+                o.wanted = true;
+                o.value = static_cast<float>(c.value);
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (r.ok)
+        ImGui::TextDisabled("renderer: %g", r.render);
+    ImGui::PopID();
+}
+
+void DrawOverlay(effect_runtime*) {
+    std::lock_guard lock(g_mutex);
+    ImGui::TextUnformatted(UDRT_PRODUCT " " UDRT_VERSION " (phase 0 probe)");
+    if (!g_manager) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Waiting for the game's console variables...");
+        return;
+    }
+    if (g_timestamp != kKnownTimestamp)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "A different game build than the one analysed: see the log.");
+
+    ImGui::SeparatorText("Ray tracing switches");
+    for (Override& o : g_overrides) DrawOverride(o);
+    ImGui::TextDisabled("Session only: nothing is forced when the game starts.");
+
+    ImGui::SeparatorText("Related values (renderer's copy)");
+    if (ImGui::BeginTable("##watched", 2, ImGuiTableFlags_SizingFixedFit)) {
+        for (const wchar_t* name : kWatched) {
+            void* var = cvars::FindVariable(g_manager, name);
+            Reading r = var ? Read(var) : Reading{};
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(Narrow(name).c_str());
+            ImGui::TableNextColumn();
+            if (!var)
+                ImGui::TextDisabled("not a cvar");
+            else if (!r.ok)
+                ImGui::TextDisabled("unreadable");
+            else
+                ImGui::Text("%g  (priority 0x%02x)", r.render, r.priority);
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::SeparatorText("Diagnostics");
+    if (ImGui::Button("Snapshot cvars")) g_snapshotRequested = true;
+    ImGui::SetItemTooltip("Logs what changed since the last snapshot, e.g. after changing a game menu option.");
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", g_frames < kCensusFrame ? "census after 10 s" : g_status.c_str());
+    if (g_layoutBad) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Layout check found mismatches: see the log.");
+}
+
+void Install() {
+    OpenLog();
+    LogGameInfo();
+    DefineOverrides();
+    reshade::register_event<reshade::addon_event::init_device>(&OnInitDevice);
+    reshade::register_event<reshade::addon_event::present>(&OnPresent);
+    reshade::register_overlay(UDRT_PRODUCT, &DrawOverlay);
+}
+
+void Uninstall() {
+    reshade::unregister_overlay(UDRT_PRODUCT, &DrawOverlay);
+    if (g_log) {
+        Log("unloading");
+        fclose(g_log);
+        g_log = nullptr;
+    }
+}
+
+}  // namespace
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+    switch (reason) {
+        case DLL_PROCESS_ATTACH:
+            if (!reshade::register_addon(module)) return FALSE;
+            Install();
+            break;
+        case DLL_PROCESS_DETACH:
+            Uninstall();
+            reshade::unregister_addon(module);
+            break;
+    }
+    return TRUE;
+}

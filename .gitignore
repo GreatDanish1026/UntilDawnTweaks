@@ -1,0 +1,11 @@
+# Build output (rebuild with build.ps1)
+bin/
+*.exe
+*.dll
+*.addon64
+
+# Logs the add-on writes next to the game
+UntilDawnRT*.log
+__pycache__/
+publics.txt
+*.pkl
