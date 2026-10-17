@@ -81,7 +81,30 @@ Same storage as UE 4.26, but different vtable details:
 
 The probe compares the renderer value it reads against the engine's own `GetFloat` for
 every census cvar (off the game thread GetFloat returns the renderer's copy) and logs the
-match count.
+match count. In game (0.0.1): 267 match, 0 mismatch, so the layout is right.
+
+SetBy priorities were renumbered too. `ProcessUserConsoleInput` calls Set with
+`0x0b000000` (console); 4.26's console value, `0x09000000`, is below what the game uses
+from code here (`0x0a000000`), so 0.0.1's writes to code-set cvars were refused.
+
+## Phase 0, first test (0.0.1)
+
+- `BMEnhancedMode` 1 and 2 reached the renderer (priority before: `0x02`, GameSetting, so
+  the menu writes it), but the picture didn't change.
+- `r.BM.AllowRTReflections` stayed 0: the game holds it at `0x0a` (code), above 0.0.1's
+  `0x09`. Same for `r.RayTracing.Reflections = 0`, `r.Shadow.Virtual.Enable = 1` and
+  `r.BM.AllowVirtualShadowMapsMode = 2`.
+- `MaxRoughness` alone can't show anything while `r.RayTracing.Reflections` is 0.
+- Other values: `r.RayTracing.Enable 1`, `r.RayTracing 1`, `r.RayTracing.Shadows 1`
+  (all light types 1 except Rect), `r.RayTracing.AmbientOcclusion 1`, `r.ReflectionMethod 3`,
+  `r.RayTracing.ForceAllRayTracingEffects` default.
+
+`ShouldRenderRayTracingShadowsForLight` checks, in order: `IsRayTracingLightAllowed`
+(the BM gate), `ShouldRenderRayTracingEffect(true, 3)` (RT enabled, pipeline support,
+`ForceAllRayTracingEffects`), the per-light-type cvar, then `r.RayTracing.Shadows`. All
+pass with mode 2, so either the shadows render and look like the virtual shadow maps they
+replace, or VSMs take precedence. 0.0.2 counts DispatchRays per pipeline to tell, and can
+force VSMs off.
 
 ## Online reports
 

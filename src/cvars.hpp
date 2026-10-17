@@ -47,7 +47,9 @@ constexpr uint32_t kSet = 0x80;
 constexpr uint32_t kGetInt = 0x90;
 constexpr uint32_t kGetFloat = 0x98;
 constexpr uint32_t kFlags = 0x18;  // EConsoleVariableFlags; top byte = SetBy priority
-constexpr uint32_t kSetByConsole = 0x09000000;
+// What FConsoleManager::ProcessUserConsoleInput passes to Set. UE 5 renumbered the
+// priorities (4.26: 0x09000000); the game sets some cvars from code at 0x0a000000.
+constexpr uint32_t kSetByConsole = 0x0b000000;
 
 struct Section {
     const uint8_t* begin = nullptr;

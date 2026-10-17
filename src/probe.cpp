@@ -1,14 +1,21 @@
 // UntilDawnRT phase 0: a ReShade add-on that checks the console variable layout in Until
 // Dawn (UE 5) and lets you force the cvars that gate its ray tracing, live, from an overlay
-// tab. See docs/FINDINGS.md for why these three:
+// tab. See docs/FINDINGS.md for why these:
 //   r.RayTracing.Enable.BMEnhancedMode     which lights may cast RT shadows (0/1/2)
 //   r.BM.AllowRTReflections                RT reflections everywhere or only where allowed
+//   r.RayTracing.Reflections               the game holds it at 0 from code
 //   r.RayTracing.Reflections.MaxRoughness  the project ships 0.01: mirrors only
+//   r.Shadow.Virtual.Enable                virtual shadow maps, which may hide RT shadows
+//
+// It also counts the ray tracing work the GPU actually does: every DispatchRays, grouped
+// by the ray tracing pipeline bound for it (named by its shaders' export names), shown
+// live for the last frame.
 //
 // What it records, next to the game executable:
 //   UntilDawnRT.log  the census (every cvar matching kPrefixes: type, kind, main and
 //                    renderer values, priority), the layout check, every override and
-//                    release, and later snapshots' changes (e.g. after a menu change)
+//                    release, later snapshots' changes (e.g. after a menu change), every
+//                    ray tracing pipeline the game creates, and one-frame dispatch logs
 //
 // Overrides are session-only in phase 0: mode 2 is documented as very slow, so nothing is
 // forced at start.
@@ -20,6 +27,7 @@
 #include <imgui.h>
 #include <reshade.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -289,6 +297,132 @@ void Snapshot() {
     g_status = buf;
 }
 
+// ---------------------------------------------------------------- ray tracing work
+
+std::mutex g_rtMutex;  // pipeline events come from the game's pipeline compile threads
+uint32_t g_rtPipelines = 0;
+std::map<uint64_t, std::string> g_pipelineNames;  // pipeline handle -> its shaders' export names
+std::map<command_list*, uint64_t> g_boundRt;      // ray tracing pipeline bound on each command list
+struct DispatchStat {
+    uint32_t count = 0, width = 0, height = 0;
+};
+std::map<uint64_t, DispatchStat> g_frameDispatches;  // this frame, by pipeline
+std::map<uint64_t, DispatchStat> g_lastDispatches;   // the last complete frame
+bool g_logDispatches = false;                        // log the next complete frame
+
+// Printable strings in a DXIL container's RDAT part: function and export names.
+std::vector<std::string> RdatNames(const void* code, size_t size) {
+    std::vector<std::string> names;
+    auto b = static_cast<const uint8_t*>(code);
+    if (!b || size < 32 || memcmp(b, "DXBC", 4) != 0) return names;
+    uint32_t parts;
+    memcpy(&parts, b + 28, 4);
+    for (uint32_t i = 0; i < parts && 32 + 4 * (i + 1) <= size; ++i) {
+        uint32_t off;
+        memcpy(&off, b + 32 + 4 * i, 4);
+        if (off + 8 > size || memcmp(b + off, "RDAT", 4) != 0) continue;
+        uint32_t partSize;
+        memcpy(&partSize, b + off + 4, 4);
+        const uint8_t* p = b + off + 8;
+        const uint8_t* end = p + (off + 8 + partSize <= size ? partSize : size - off - 8);
+        std::string cur;
+        for (; p < end; ++p) {
+            if (*p >= 0x20 && *p < 0x7f) {
+                cur.push_back(static_cast<char>(*p));
+                continue;
+            }
+            if (*p == 0 && cur.size() >= 4 && std::find(names.begin(), names.end(), cur) == names.end())
+                names.push_back(cur);
+            cur.clear();
+        }
+    }
+    return names;
+}
+
+// Adds the plain (unmangled) names to a comma-separated list, skipping repeats.
+void AddNames(std::string& list, const std::vector<std::string>& names) {
+    for (const std::string& n : names) {
+        if (n.find_first_of("?@") != std::string::npos || list.find(n) != std::string::npos) continue;
+        if (list.size() > 160) {
+            if (list.compare(list.size() - 3, 3, "...") != 0) list += ", ...";
+            return;
+        }
+        list += list.empty() ? n : ", " + n;
+    }
+}
+
+bool IsShaderSubobject(pipeline_subobject_type t) {
+    return t >= pipeline_subobject_type::raygen_shader && t <= pipeline_subobject_type::callable_shader;
+}
+
+void OnInitPipeline(device*, pipeline_layout, uint32_t count, const pipeline_subobject* subobjects, pipeline pipe) {
+    bool rt = false;
+    for (uint32_t i = 0; i < count; ++i)
+        rt |= IsShaderSubobject(subobjects[i].type) || subobjects[i].type == pipeline_subobject_type::libraries ||
+              subobjects[i].type == pipeline_subobject_type::shader_groups;
+    if (!rt) return;
+    std::lock_guard lock(g_rtMutex);
+    std::string names;
+    uint32_t shaders = 0, libraries = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const pipeline_subobject& s = subobjects[i];
+        if (IsShaderSubobject(s.type)) {
+            auto descs = static_cast<const shader_desc*>(s.data);
+            for (uint32_t j = 0; j < s.count; ++j) {
+                if (descs[j].entry_point) AddNames(names, {descs[j].entry_point});
+                AddNames(names, RdatNames(descs[j].code, descs[j].code_size));
+            }
+            shaders += s.count;
+        } else if (s.type == pipeline_subobject_type::libraries) {
+            auto libs = static_cast<const pipeline*>(s.data);
+            for (uint32_t j = 0; j < s.count; ++j) {
+                auto it = g_pipelineNames.find(libs[j].handle);
+                if (it != g_pipelineNames.end()) AddNames(names, {it->second});
+            }
+            libraries += s.count;
+        }
+    }
+    ++g_rtPipelines;
+    g_pipelineNames[pipe.handle] = names;
+    Log("rt pipeline %016llx: %u shader libraries, %u collections: %s", static_cast<unsigned long long>(pipe.handle),
+        shaders, libraries, names.c_str());
+}
+
+void OnBindPipeline(command_list* cmd, pipeline_stage stages, pipeline pipe) {
+    if ((static_cast<uint32_t>(stages) & static_cast<uint32_t>(pipeline_stage::ray_tracing_shader)) == 0) return;
+    std::lock_guard lock(g_rtMutex);
+    g_boundRt[cmd] = pipe.handle;
+}
+
+bool OnDispatchRays(command_list* cmd, resource, uint64_t, uint64_t, resource, uint64_t, uint64_t, uint64_t, resource,
+                    uint64_t, uint64_t, uint64_t, resource, uint64_t, uint64_t, uint64_t, uint32_t width, uint32_t height,
+                    uint32_t) {
+    std::lock_guard lock(g_rtMutex);
+    DispatchStat& s = g_frameDispatches[g_boundRt[cmd]];
+    ++s.count;
+    s.width = width;
+    s.height = height;
+    return false;
+}
+
+std::string PipelineName(uint64_t handle) {
+    auto it = g_pipelineNames.find(handle);
+    return it == g_pipelineNames.end() || it->second.empty() ? "unnamed" : it->second;
+}
+
+// Called at present: the frame's dispatches become the last frame's.
+void EndFrameDispatches() {
+    std::lock_guard lock(g_rtMutex);
+    g_lastDispatches.swap(g_frameDispatches);
+    g_frameDispatches.clear();
+    if (!g_logDispatches) return;
+    g_logDispatches = false;
+    Log("ray dispatches in one frame: %zu pipelines", g_lastDispatches.size());
+    for (auto& [handle, s] : g_lastDispatches)
+        Log("  pipeline %016llx: %u dispatches, last %ux%u (%s)", static_cast<unsigned long long>(handle), s.count,
+            s.width, s.height, PipelineName(handle).c_str());
+}
+
 // ---------------------------------------------------------------- overrides
 
 // A control forces one cvar through IConsoleVariable::Set at ECVF_SetByConsole, which
@@ -332,10 +466,18 @@ void DefineOverrides() {
         {L"r.BM.AllowRTReflections", "Allow RT reflections",
          "Ballistic Moon's reflection setting.\n0: always off\n1: on in areas where supported",
          {{0, "0 Off"}, {1, "1 Where supported"}}},
+        {L"r.RayTracing.Reflections", "RT reflections",
+         "UE's ray traced reflections switch. The game sets it from code (0 in the first test).\n"
+         "-1: post-process volume decides\n0: off\n1: on",
+         {{-1, "-1 Volume"}, {0, "0 Off"}, {1, "1 On"}}},
         {L"r.RayTracing.Reflections.MaxRoughness", "Reflections max roughness",
          "Surfaces rougher than this skip ray traced reflections. The project ships 0.01 (mirrors only); UE's default "
          "is 0.6.",
          {}, 0.0f, 1.0f},
+        {L"r.Shadow.Virtual.Enable", "Virtual shadow maps",
+         "UE's virtual shadow maps (the game holds them on from code). Turning them off tests whether they hide "
+         "ray traced shadows.",
+         {{0, "0 Off"}, {1, "1 On"}}},
     };
 }
 
@@ -435,6 +577,7 @@ void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, c
         ApplyOverrides();
         if (g_frames % 60 == 0) CheckOverrides();
     }
+    EndFrameDispatches();
 }
 
 // ---------------------------------------------------------------- overlay
@@ -443,7 +586,7 @@ void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, c
 const wchar_t* const kWatched[] = {
     L"r.RayTracing.Enable",       L"r.RayTracing.Shadows",           L"r.RayTracing.Reflections",
     L"r.RayTracing.AmbientOcclusion", L"r.ReflectionMethod",         L"r.Shadow.Virtual.Enable",
-    L"r.BM.AllowVirtualShadowMapsMode", L"r.RayTracing.ForceAllRayTracingEffects",
+    L"r.BM.AllowVirtualShadowMapsMode", L"r.RayTracing.ForceAllRayTracingEffects", L"r.RayTracing.Shadows.Lights.Spot",
 };
 
 void DrawOverride(Override& o) {
@@ -521,6 +664,26 @@ void DrawOverlay(effect_runtime*) {
         ImGui::EndTable();
     }
 
+    ImGui::SeparatorText("Ray tracing work (last frame)");
+    {
+        std::lock_guard rtLock(g_rtMutex);
+        if (g_lastDispatches.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "No rays dispatched (%u RT pipelines created so far)",
+                               g_rtPipelines);
+        } else if (ImGui::BeginTable("##rays", 3, ImGuiTableFlags_SizingFixedFit)) {
+            for (auto& [handle, st] : g_lastDispatches) {
+                ImGui::TableNextColumn();
+                ImGui::Text("%u x", st.count);
+                ImGui::TableNextColumn();
+                ImGui::Text("%ux%u", st.width, st.height);
+                ImGui::TableNextColumn();
+                ImGui::TextWrapped("%s", PipelineName(handle).c_str());
+            }
+            ImGui::EndTable();
+        }
+    }
+    if (ImGui::Button("Log ray dispatches (one frame)")) g_logDispatches = true;
+
     ImGui::SeparatorText("Diagnostics");
     if (ImGui::Button("Snapshot cvars")) g_snapshotRequested = true;
     ImGui::SetItemTooltip("Logs what changed since the last snapshot, e.g. after changing a game menu option.");
@@ -535,6 +698,9 @@ void Install() {
     DefineOverrides();
     reshade::register_event<reshade::addon_event::init_device>(&OnInitDevice);
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
+    reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
+    reshade::register_event<reshade::addon_event::bind_pipeline>(&OnBindPipeline);
+    reshade::register_event<reshade::addon_event::dispatch_rays>(&OnDispatchRays);
     reshade::register_overlay(UDRT_PRODUCT, &DrawOverlay);
 }
 
