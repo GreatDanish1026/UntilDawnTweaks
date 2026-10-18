@@ -236,3 +236,15 @@ Confirmed in game: RT shadows and RT AO visibly work, reflections run (a new pip
 themselves after a restart. Cost in one test at 4K output: 146 → 90 fps with everything on.
 The linked pipelines' ray generation exports are renamed, so `GetShaderIdentifier` with the
 library names finds none.
+
+## RT noise (0.0.8)
+
+As shipped, every RT effect traces 1 ray per pixel and relies on UE's denoisers:
+`r.RayTracing.Shadows.SamplesPerPixel`, `r.RayTracing.Reflections.SamplesPerPixel` and
+`r.RayTracing.AmbientOcclusion.SamplesPerPixel` are all -1 (light / post-process volume
+decides, normally 1); `r.Shadow.Denoiser` and `r.Reflections.Denoiser` are 2 (default denoiser)
+with 8 reconstruction samples, `r.AmbientOcclusion.Denoiser` 2 with 16. With RT shadows on
+every light and reflections at roughness 0.4, that shows as noise. The RT quality setting
+forces 2 (High) or 4 (Ultra) rays per pixel for all three and 16 reconstruction samples for
+the shadow and reflection denoisers. Confirmed in game: the noise cleans up at an acceptable
+cost.

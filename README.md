@@ -23,7 +23,7 @@ It has no effect in SDR. With it, the game's HDR brightness sliders do nothing; 
 
 ## The add-on
 
-**Status: 0.0.7.** The overlay tab shows the two saved sections below; everything else is
+**Status: 0.0.8.** The overlay tab shows the two saved sections below; everything else is
 under a collapsed **Advanced** header.
 
 **Ray tracing** (on by default, saved in `ReShade.ini`, applied at every start). Turn the
@@ -36,9 +36,13 @@ RT effect off.
   only) / **Everywhere** (default). Follows the game's RT reflections menu option.
 - **Reflections max roughness**: 0.4 by default (the game uses 0.01). Higher reaches rougher
   surfaces, costs more and can look noisier.
+- **RT quality**: Game (1 ray per pixel) / **High** (default, 2) / Ultra (4), for RT shadows,
+  reflections and AO, with the shadow and reflection denoisers taking 16 reconstruction
+  samples instead of 8. Less noise; the cost of those effects goes up about as much.
 
 RT ambient occlusion is the game's own and works once its Ray Tracing option is on. In one
-test at 4K output, everything on took the game from 146 to 90 fps.
+test at 4K output, shadows on all lights, reflections everywhere and AO took the game from
+146 to 90 fps (before RT quality).
 
 **HDR brightness** (on by default, saved in `ReShade.ini`, applied at every start):
 
@@ -60,6 +64,11 @@ settings control are locked.
 - **Allow RT reflections** (`r.BM.AllowRTReflections`): 0 off, 1 where supported.
 - **RT reflections** (`r.RayTracing.Reflections`): the game holds it at 0.
 - **Reflections max roughness** (`r.RayTracing.Reflections.MaxRoughness`): the game uses 0.01.
+- **Shadow / reflection / AO rays per pixel** (`r.RayTracing.Shadows.SamplesPerPixel`,
+  `r.RayTracing.Reflections.SamplesPerPixel`, `r.RayTracing.AmbientOcclusion.SamplesPerPixel`;
+  -1 as shipped) and **shadow / reflection denoiser samples**
+  (`r.Shadow.Denoiser.ReconstructionSamples`, `r.Reflections.Denoiser.ReconstructionSamples`;
+  8 as shipped), to find which effect is noisy.
 - **Virtual shadow maps** (`r.Shadow.Virtual.Enable`): to test whether they hide RT shadows.
 - **Uniform Colour Pipeline HDR** (`r.UCP.HDR`): the game's own HDR output (on by default;
   off fixes the black screen).

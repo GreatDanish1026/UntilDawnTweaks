@@ -570,6 +570,23 @@ void DefineOverrides() {
          "Surfaces rougher than this skip ray traced reflections. The project ships 0.01 (mirrors only); UE's default "
          "is 0.6.",
          {}, 0.0f, 1.0f},
+        {Group::RayTracing, L"r.RayTracing.Shadows.SamplesPerPixel", "Shadow rays per pixel",
+         "Rays per pixel for ray traced shadows. More is less noisy and costs about proportionally more.\n"
+         "-1: each light's own setting (normally 1)",
+         {{-1, "-1 Light"}, {1, "1"}, {2, "2"}, {4, "4"}}},
+        {Group::RayTracing, L"r.RayTracing.Reflections.SamplesPerPixel", "Reflection rays per pixel",
+         "Rays per pixel for ray traced reflections. More is less noisy on rough surfaces and costs about "
+         "proportionally more.\n-1: post-process volume decides (normally 1)",
+         {{-1, "-1 Volume"}, {1, "1"}, {2, "2"}, {4, "4"}}},
+        {Group::RayTracing, L"r.RayTracing.AmbientOcclusion.SamplesPerPixel", "AO rays per pixel",
+         "Rays per pixel for ray traced ambient occlusion.\n-1: post-process volume decides (normally 1)",
+         {{-1, "-1 Volume"}, {1, "1"}, {2, "2"}, {4, "4"}}},
+        {Group::RayTracing, L"r.Shadow.Denoiser.ReconstructionSamples", "Shadow denoiser samples",
+         "Samples the shadow denoiser's reconstruction pass takes. More smooths harder, at little cost. Ships 8.",
+         {{8, "8"}, {16, "16"}}},
+        {Group::RayTracing, L"r.Reflections.Denoiser.ReconstructionSamples", "Reflection denoiser samples",
+         "Samples the reflection denoiser's reconstruction pass takes. More smooths harder, at little cost. Ships 8.",
+         {{8, "8"}, {16, "16"}}},
         {Group::RayTracing, L"r.Shadow.Virtual.Enable", "Virtual shadow maps",
          "UE's virtual shadow maps (the game holds them on from code). Turning them off tests whether they hide "
          "ray traced shadows.",
@@ -867,11 +884,17 @@ void ApplyBrightness() {
 
 enum RtShadows : int { kShadowsGame = 0, kShadowsEnhanced = 1, kShadowsAll = 2 };
 
+// Noise: every RT effect traces 1 ray per pixel as shipped and leans on its denoiser. High
+// and Ultra trace 2 and 4 (cost about proportional) and let the shadow and reflection
+// denoisers take 16 reconstruction samples instead of 8 (AO's already takes 16).
+enum RtQuality : int { kQualityGame = 0, kQualityHigh = 1, kQualityUltra = 2 };
+
 struct RtSettings {
     bool on = true;  // with nothing saved: on, shadows on every light, reflections everywhere
     int shadows = kShadowsAll;
     bool reflectionsEverywhere = true;
     float maxRoughness = 0.4f;
+    int quality = kQualityHigh;
     bool initialised = false;
 };
 RtSettings g_rt;
@@ -881,6 +904,7 @@ void SaveRt() {
     reshade::set_config_value(nullptr, kConfigSection, "RtShadows", g_rt.shadows);
     reshade::set_config_value(nullptr, kConfigSection, "RtReflectionsEverywhere", g_rt.reflectionsEverywhere);
     reshade::set_config_value(nullptr, kConfigSection, "RtReflectionsMaxRoughness", g_rt.maxRoughness);
+    reshade::set_config_value(nullptr, kConfigSection, "RtQuality", g_rt.quality);
 }
 
 void InitRt() {
@@ -892,11 +916,13 @@ void InitRt() {
         reshade::get_config_value(nullptr, section, "RtShadows", g_rt.shadows);
         reshade::get_config_value(nullptr, section, "RtReflectionsEverywhere", g_rt.reflectionsEverywhere);
         reshade::get_config_value(nullptr, section, "RtReflectionsMaxRoughness", g_rt.maxRoughness);
+        reshade::get_config_value(nullptr, section, "RtQuality", g_rt.quality);  // absent before 0.0.8: default
         if (section != kConfigSection) SaveRt();  // carry it over to our section
     }
-    Log("ray tracing: %s, override %s: shadows %d, reflections %s, max roughness %g",
+    g_rt.quality = std::clamp(g_rt.quality, static_cast<int>(kQualityGame), static_cast<int>(kQualityUltra));
+    Log("ray tracing: %s, override %s: shadows %d, reflections %s, max roughness %g, quality %d",
         saved ? "from ReShade.ini" : "defaults", g_rt.on ? "on" : "off", g_rt.shadows,
-        g_rt.reflectionsEverywhere ? "everywhere" : "game", g_rt.maxRoughness);
+        g_rt.reflectionsEverywhere ? "everywhere" : "game", g_rt.maxRoughness, g_rt.quality);
 }
 
 // Drives (or releases) one override from the settings.
@@ -923,6 +949,14 @@ void ApplyRt() {
     float allowed = RendererValue(L"r.BM.AllowRTReflections", 0) == 1 ? 1.0f : 0.0f;
     Drive(L"r.RayTracing.Reflections", reflections, allowed);
     Drive(L"r.RayTracing.Reflections.MaxRoughness", reflections, g_rt.maxRoughness);
+
+    bool quality = g_rt.on && g_rt.quality != kQualityGame;
+    float rays = g_rt.quality == kQualityUltra ? 4.0f : 2.0f;
+    Drive(L"r.RayTracing.Shadows.SamplesPerPixel", quality, rays);
+    Drive(L"r.RayTracing.Reflections.SamplesPerPixel", quality, rays);
+    Drive(L"r.RayTracing.AmbientOcclusion.SamplesPerPixel", quality, rays);
+    Drive(L"r.Shadow.Denoiser.ReconstructionSamples", quality, 16.0f);
+    Drive(L"r.Reflections.Denoiser.ReconstructionSamples", quality, 16.0f);
 }
 
 // ---------------------------------------------------------------- events
@@ -1165,6 +1199,11 @@ void DrawRt() {
     ImGui::SetItemTooltip("Surfaces rougher than this keep screen space and probe reflections. The game ships 0.01 "
                           "(mirrors only); higher costs more and can look noisier.");
     if (!g_rt.reflectionsEverywhere) ImGui::EndDisabled();
+    const char* qualities[] = {"Game (1 ray per pixel)", "High (2 rays per pixel)", "Ultra (4 rays per pixel)"};
+    changed |= ImGui::Combo("RT quality", &g_rt.quality, qualities, 3);
+    ImGui::SetItemTooltip("Less noise in RT shadows, reflections and AO. High and Ultra trace 2 and 4 rays per pixel "
+                          "(the cost of those effects goes up about as much) and let the shadow and reflection "
+                          "denoisers smooth harder.");
     if (!g_rt.on) ImGui::EndDisabled();
     if (changed) SaveRt();
     if (RendererValue(L"r.RayTracing.ForceAllRayTracingEffects", -1) == 0)
