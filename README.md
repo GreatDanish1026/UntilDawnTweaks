@@ -1,6 +1,6 @@
-# UntilDawnRT
+# UntilDawnTweaks
 
-A ReShade add-on that makes ray tracing visible, and HDR work, in Until Dawn (2024 remake,
+(Formerly UntilDawnRT.) A ReShade add-on that makes ray tracing visible, and HDR work, in Until Dawn (2024 remake,
 Unreal Engine 5, DirectX 12). The game's ray tracing is compiled in and switched on, but its
 own settings keep it from showing: most lights opt out of RT shadows, and reflections are
 limited to mirror-like surfaces in curated areas. Turning HDR on shows the UI over a black
@@ -23,7 +23,8 @@ It has no effect in SDR. With it, the game's HDR brightness sliders do nothing; 
 
 ## The add-on
 
-**Status: 0.0.6.**
+**Status: 0.0.7.** The overlay tab shows the two saved sections below; everything else is
+under a collapsed **Advanced** header.
 
 **Ray tracing** (on by default, saved in `ReShade.ini`, applied at every start). Turn the
 game's own **Ray Tracing** option on in its graphics menu: with it off, the game keeps every
@@ -48,7 +49,8 @@ test at 4K output, everything on took the game from 146 to 90 fps.
 
 These start at the game's own values, so nothing changes until you move one.
 
-Session-only switches for testing (not saved; rows the saved settings control are locked):
+**Advanced** (collapsed): session-only switches for testing, not saved; rows the saved
+settings control are locked.
 
 - **RT master switch** (`r.RayTracing.ForceAllRayTracingEffects`): what the menu's Ray Tracing
   option sets (-1 on, 0 every RT effect off).
@@ -73,17 +75,20 @@ structure builds and ray dispatches by pipeline.
 
 ## Install
 Needs ReShade 6.8+ *with full add-on support* (works next to RenoDX).
-Copy `bin\UntilDawnRT.addon64` next to `Bates-Win64-Shipping.exe`
-(`Windows\Bates\Binaries\Win64`), or run `.\build.ps1 -Install`.
+Copy `bin\UntilDawnTweaks.addon64` next to `Bates-Win64-Shipping.exe`
+(`Windows\Bates\Binaries\Win64`), or run `.\build.ps1 -Install`. Delete an older
+`UntilDawnRT.addon64` there if you have one (`build.ps1 -Install` does); its saved settings
+carry over.
 
 ## Use
-Open ReShade (Home), go to the **UntilDawnRT** tab. Pick a value for a switch, or "Game"
-to hand it back. "Ray tracing work" lists the last second's DispatchRays calls by
+Open ReShade (Home), go to the **UntilDawnTweaks** tab and set Ray tracing and HDR
+brightness. Under **Advanced**, pick a value for a switch, or "Game" to hand it back.
+"Ray tracing work" lists the last second's DispatchRays calls by
 pipeline, so you can see which RT effects actually run (the game links its RT pipelines
-with `AddToStateObject`, which ReShade doesn't report, so most show as unnamed). "Related
-values" shows the renderer's current values of the other RT cvars, and **Snapshot cvars**
-logs what changed since the last snapshot (e.g. after changing a menu option). The log,
-`UntilDawnRT.log`, is next to the exe.
+with `AddToStateObject`, which ReShade doesn't report, so most show as unnamed). "Ray
+tracing values" shows the renderer's current values of the other RT cvars, and **Snapshot
+cvars** logs what changed since the last snapshot (e.g. after changing a menu option). The
+log, `UntilDawnTweaks.log`, is next to the exe.
 
 ## Build
 Visual Studio 2022+ with the C++ x64 tools: `.\build.ps1`.

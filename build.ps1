@@ -1,4 +1,4 @@
-# Builds bin\UntilDawnRT.addon64 with MSVC (Visual Studio 2022+ with C++ tools).
+# Builds bin\UntilDawnTweaks.addon64 with MSVC (Visual Studio 2022+ with C++ tools).
 # MSVC is required: ReShade is built with it, and MinGW returns API structs
 # differently, which crashes inside ReShade.
 # Usage: .\build.ps1 [-Install] [-GameBin <folder of Bates-Win64-Shipping.exe>]
@@ -8,7 +8,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$name = "UntilDawnRT"
+$name = "UntilDawnTweaks"
+$legacyName = "UntilDawnRT"  # the name before 0.0.7
 $addon = "$root\bin\$name.addon64"
 $exe = "Bates-Win64-Shipping.exe"
 
@@ -40,4 +41,9 @@ if ($Install) {
     if (Get-Process ([IO.Path]::GetFileNameWithoutExtension($exe)) -ErrorAction SilentlyContinue) { throw "Close the game first." }
     Copy-Item $addon $GameBin -Force
     Write-Host "Installed $name to $GameBin"
+    # Both would load, and fight over the same cvars.
+    if (Test-Path "$GameBin\$legacyName.addon64") {
+        Remove-Item "$GameBin\$legacyName.addon64"
+        Write-Host "Removed the old $legacyName.addon64"
+    }
 }

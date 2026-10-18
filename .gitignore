@@ -6,6 +6,7 @@ bin/
 
 # Logs the add-on writes next to the game
 UntilDawnRT*.log
+UntilDawnTweaks*.log
 __pycache__/
 publics.txt
 *.pkl

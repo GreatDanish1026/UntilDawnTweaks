@@ -1,31 +1,24 @@
-// UntilDawnRT phase 0: a ReShade add-on that checks the console variable layout in Until
-// Dawn (UE 5) and lets you force the cvars that gate its ray tracing, live, from an overlay
-// tab. See docs/FINDINGS.md for why these:
-//   r.RayTracing.Enable.BMEnhancedMode     which lights may cast RT shadows (0/1/2)
-//   r.BM.AllowRTReflections                RT reflections everywhere or only where allowed
-//   r.RayTracing.Reflections               the game holds it at 0 from code
-//   r.RayTracing.Reflections.MaxRoughness  the project ships 0.01: mirrors only
-//   r.Shadow.Virtual.Enable                virtual shadow maps, which may hide RT shadows
+// UntilDawnTweaks (formerly UntilDawnRT): a ReShade add-on for Until Dawn (2024 remake, UE 5,
+// DirectX 12) that makes its ray tracing show and its HDR usable. See docs/FINDINGS.md.
 //
-// It also counts the ray tracing work the GPU actually does: every DispatchRays, grouped
-// by the ray tracing pipeline bound for it (named by its shaders' export names), shown
-// live for the last second.
+// Saved settings (ReShade.ini, applied at every start, on by default):
+//   Ray tracing    RT shadows on all lights (r.RayTracing.Enable.BMEnhancedMode 2) and RT
+//                  reflections everywhere (r.RayTracing.Reflections, MaxRoughness), which the
+//                  game otherwise limits to designer-marked areas and mirror-like surfaces
+//   HDR brightness peak, paper white and UI brightness, replacing the game's HDR sliders,
+//                  which do nothing once its Uniform Colour Pipeline is off (r.UCP.HDR=0 in
+//                  Engine.ini, the fix for the black screen)
 //
-// HDR (0.0.4): turning HDR on shows the UI over a black scene. The HDR switches force the
-// cvars on that path (the Uniform Colour Pipeline, output device, UI composite, calibration
-// screen) and the HDR readout shows them with the swap chain's format and colour space.
-//
-// HDR brightness (0.0.5): with the pipeline off, the game's HDR sliders do nothing. Peak,
-// paper white and UI brightness sliders replace them, saved in ReShade.ini.
+// Advanced (collapsed in the overlay): session-only switches for the RT and HDR cvars, the
+// renderer's values of the related cvars, the swap chain's format and colour space, and the
+// GPU work of the last second (draws, compute dispatches, acceleration structure builds and
+// DispatchRays by pipeline).
 //
 // What it records, next to the game executable:
-//   UntilDawnRT.log  the census (every cvar matching kPrefixes: type, kind, main and
-//                    renderer values, priority), the layout check, every override and
-//                    release, later snapshots' changes (e.g. after a menu change), every
-//                    ray tracing pipeline the game creates, and one-second work logs
-//
-// Overrides are session-only in phase 0: mode 2 is documented as very slow, so nothing is
-// forced at start.
+//   UntilDawnTweaks.log  the census (every cvar matching kPrefixes: type, kind, main and
+//                        renderer values, priority), the layout check, every override and
+//                        release, later snapshots' changes (e.g. after a menu change), every
+//                        ray tracing pipeline the game creates, and one-second work logs
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -52,7 +45,8 @@
 
 extern "C" __declspec(dllexport) const char* NAME = UDRT_PRODUCT;
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Ray tracing and HDR probe for " UDRT_GAME " (DirectX 12): cvar layout check and live RT and HDR switches.";
+    "Makes " UDRT_GAME "'s ray tracing show and its HDR usable: RT shadows and reflections everywhere, HDR peak "
+    "and paper white.";
 
 namespace {
 
@@ -790,15 +784,27 @@ void SaveBrightness() {
     reshade::set_config_value(nullptr, kConfigSection, "HdrUiNits", g_bright.ui);
 }
 
+// The ReShade.ini section holding this key: ours, else the one from before the rename
+// (UntilDawnRT), else null.
+const char* SavedSection(const char* key) {
+    size_t size = 0;
+    if (reshade::get_config_value(nullptr, kConfigSection, key, nullptr, &size)) return kConfigSection;
+    if (reshade::get_config_value(nullptr, UDRT_LEGACY_PRODUCT, key, nullptr, &size)) return UDRT_LEGACY_PRODUCT;
+    return nullptr;
+}
+
 // Saved values if there are any; otherwise the override is on and the sliders start at the
 // game's values, so nothing looks different until one is moved.
 void InitBrightness() {
     g_bright.initialised = true;
-    bool saved = reshade::get_config_value(nullptr, kConfigSection, "HdrBrightnessOverride", g_bright.on);
+    const char* section = SavedSection("HdrBrightnessOverride");
+    bool saved = section != nullptr;
     if (saved) {
-        reshade::get_config_value(nullptr, kConfigSection, "HdrPeakNits", g_bright.peak);
-        reshade::get_config_value(nullptr, kConfigSection, "HdrPaperWhiteNits", g_bright.paper);
-        reshade::get_config_value(nullptr, kConfigSection, "HdrUiNits", g_bright.ui);
+        reshade::get_config_value(nullptr, section, "HdrBrightnessOverride", g_bright.on);
+        reshade::get_config_value(nullptr, section, "HdrPeakNits", g_bright.peak);
+        reshade::get_config_value(nullptr, section, "HdrPaperWhiteNits", g_bright.paper);
+        reshade::get_config_value(nullptr, section, "HdrUiNits", g_bright.ui);
+        if (section != kConfigSection) SaveBrightness();  // carry it over to our section
     } else {
         int nits = 0;
         if (int* field = NitsField(); field && cvars::SafeCopy(&nits, field, 4) && nits > 0) g_bright.peak = nits;
@@ -879,11 +885,14 @@ void SaveRt() {
 
 void InitRt() {
     g_rt.initialised = true;
-    bool saved = reshade::get_config_value(nullptr, kConfigSection, "RtOverride", g_rt.on);
+    const char* section = SavedSection("RtOverride");
+    bool saved = section != nullptr;
     if (saved) {
-        reshade::get_config_value(nullptr, kConfigSection, "RtShadows", g_rt.shadows);
-        reshade::get_config_value(nullptr, kConfigSection, "RtReflectionsEverywhere", g_rt.reflectionsEverywhere);
-        reshade::get_config_value(nullptr, kConfigSection, "RtReflectionsMaxRoughness", g_rt.maxRoughness);
+        reshade::get_config_value(nullptr, section, "RtOverride", g_rt.on);
+        reshade::get_config_value(nullptr, section, "RtShadows", g_rt.shadows);
+        reshade::get_config_value(nullptr, section, "RtReflectionsEverywhere", g_rt.reflectionsEverywhere);
+        reshade::get_config_value(nullptr, section, "RtReflectionsMaxRoughness", g_rt.maxRoughness);
+        if (section != kConfigSection) SaveRt();  // carry it over to our section
     }
     Log("ray tracing: %s, override %s: shadows %d, reflections %s, max roughness %g",
         saved ? "from ReShade.ini" : "defaults", g_rt.on ? "on" : "off", g_rt.shadows,
@@ -1093,7 +1102,7 @@ void DrawOverride(Override& o) {
         return;
     }
     if (o.driven) {
-        ImGui::TextDisabled("set by Ray tracing settings above");
+        ImGui::TextDisabled("set by the Ray tracing settings");
         ImGui::TableNextColumn();
         ImGui::AlignTextToFramePadding();
         if (r.ok) ImGui::TextDisabled("renderer: %g", r.render);
@@ -1197,12 +1206,16 @@ void DrawBrightness() {
         ImGui::TextDisabled("HDR is off in the game: these apply once it is on.");
     else if (int built = 0; cvars::SafeCopy(&built, g_base + kSinkNitsRva, 4))
         ImGui::TextDisabled("Tone curve built for %d nits", built);
+}
+
+// The user settings fields the peak goes through (Advanced).
+void DrawHdrSettingsFields() {
     if (uint8_t* settings = UserSettings()) {
         uint8_t flag = 0;
         int nits = 0;
         cvars::SafeCopy(&flag, settings + kUseHdr, 1);
         cvars::SafeCopy(&nits, settings + kHdrNits, 4);
-        ImGui::TextDisabled("Game user settings: bUseHDRDisplayOutput %u, HDRDisplayOutputNits %d", flag, nits);
+        ImGui::Text("Game user settings: bUseHDRDisplayOutput %u, HDRDisplayOutputNits %d", flag, nits);
     }
 }
 
@@ -1247,7 +1260,7 @@ void DrawWatched(const char* id, const wchar_t* const* names, size_t count) {
 
 void DrawOverlay(effect_runtime*) {
     std::lock_guard lock(g_mutex);
-    ImGui::TextUnformatted(UDRT_PRODUCT " " UDRT_VERSION " (phase 0 probe)");
+    ImGui::TextUnformatted(UDRT_PRODUCT " " UDRT_VERSION);
     if (!g_manager) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Waiting for the game's console variables...");
         return;
@@ -1255,25 +1268,29 @@ void DrawOverlay(effect_runtime*) {
     if (g_timestamp != kKnownTimestamp)
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "A different game build than the one analysed: see the log.");
 
-    ImGui::SeparatorText("HDR brightness");
-    DrawBrightness();
-
     ImGui::SeparatorText("Ray tracing");
     DrawRt();
 
+    ImGui::SeparatorText("HDR brightness");
+    DrawBrightness();
+
+    ImGui::Spacing();
+    if (!ImGui::CollapsingHeader("Advanced")) return;  // closed by default: testing and diagnostics
+    ImGui::TextDisabled("Session-only switches and readouts for testing. Nothing here is saved.");
+
     ImGui::SeparatorText("HDR");
     ImGui::Text("Swap chain: %s, %s", FormatName(g_backBufferFormat), ColorSpaceName(g_colorSpace));
+    DrawHdrSettingsFields();
     DrawSwitches(Group::Hdr);
     if (ImGui::TreeNode("HDR values (renderer's copy)")) {
         DrawWatched("##watchedHdr", kWatchedHdr, std::size(kWatchedHdr));
         ImGui::TreePop();
     }
 
-    ImGui::SeparatorText("Ray tracing test switches");
+    ImGui::SeparatorText("Ray tracing");
     DrawSwitches(Group::RayTracing);
-    ImGui::TextDisabled("Session only: not saved.");
 
-    ImGui::SeparatorText("Related values (renderer's copy)");
+    ImGui::SeparatorText("Ray tracing values (renderer's copy)");
     DrawWatched("##watched", kWatched, std::size(kWatched));
 
     ImGui::SeparatorText("Ray tracing work (last second)");
