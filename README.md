@@ -1,6 +1,6 @@
 # UntilDawnRT
 
-A ReShade add-on to make ray tracing visible, and HDR work, in Until Dawn (2024 remake,
+A ReShade add-on that makes ray tracing visible, and HDR work, in Until Dawn (2024 remake,
 Unreal Engine 5, DirectX 12). The game's ray tracing is compiled in and switched on, but its
 own settings keep it from showing: most lights opt out of RT shadows, and reflections are
 limited to mirror-like surfaces in curated areas. Turning HDR on shows the UI over a black
@@ -23,7 +23,21 @@ It has no effect in SDR. With it, the game's HDR brightness sliders do nothing; 
 
 ## The add-on
 
-**Status: 0.0.5.**
+**Status: 0.0.6.**
+
+**Ray tracing** (on by default, saved in `ReShade.ini`, applied at every start). Turn the
+game's own **Ray Tracing** option on in its graphics menu: with it off, the game keeps every
+RT effect off.
+
+- **RT shadows**: Game (most lights opt out of RT shadows) / Lights marked enhanced /
+  **All lights** (default). The most visible change, and the most costly.
+- **RT reflections**: Game (only inside areas the designers marked, mirror-like surfaces
+  only) / **Everywhere** (default). Follows the game's RT reflections menu option.
+- **Reflections max roughness**: 0.4 by default (the game uses 0.01). Higher reaches rougher
+  surfaces, costs more and can look noisier.
+
+RT ambient occlusion is the game's own and works once its Ray Tracing option is on. In one
+test at 4K output, everything on took the game from 146 to 90 fps.
 
 **HDR brightness** (on by default, saved in `ReShade.ini`, applied at every start):
 
@@ -34,8 +48,11 @@ It has no effect in SDR. With it, the game's HDR brightness sliders do nothing; 
 
 These start at the game's own values, so nothing changes until you move one.
 
-Session-only switches for testing (nothing forced at start):
+Session-only switches for testing (not saved; rows the saved settings control are locked):
 
+- **RT master switch** (`r.RayTracing.ForceAllRayTracingEffects`): what the menu's Ray Tracing
+  option sets (-1 on, 0 every RT effect off).
+- **RT ambient occlusion** (`r.RayTracing.AmbientOcclusion`).
 - **Enhanced RT mode** (`r.RayTracing.Enable.BMEnhancedMode`): 0 off, 1 lights marked
   enhanced-only, 2 every light (the game warns this is very slow).
 - **Allow RT reflections** (`r.BM.AllowRTReflections`): 0 off, 1 where supported.
@@ -51,7 +68,8 @@ Session-only switches for testing (nothing forced at start):
 - **UCP exposure** (`r.UCP.ExposureAdjust`) and **max luminance** (`r.UCP.HDR.BMMaxLuminanceOverride`).
 
 It also shows the swap chain's format and colour space, the renderer's values of the RT and
-HDR cvars, and the ray tracing work the GPU does each frame.
+HDR cvars, and the GPU work of the last second: draws, compute dispatches, acceleration
+structure builds and ray dispatches by pipeline.
 
 ## Install
 Needs ReShade 6.8+ *with full add-on support* (works next to RenoDX).
@@ -60,8 +78,9 @@ Copy `bin\UntilDawnRT.addon64` next to `Bates-Win64-Shipping.exe`
 
 ## Use
 Open ReShade (Home), go to the **UntilDawnRT** tab. Pick a value for a switch, or "Game"
-to hand it back. "Ray tracing work" lists the last frame's DispatchRays calls by
-pipeline (its shaders' names), so you can see which RT effects actually run. "Related
+to hand it back. "Ray tracing work" lists the last second's DispatchRays calls by
+pipeline, so you can see which RT effects actually run (the game links its RT pipelines
+with `AddToStateObject`, which ReShade doesn't report, so most show as unnamed). "Related
 values" shows the renderer's current values of the other RT cvars, and **Snapshot cvars**
 logs what changed since the last snapshot (e.g. after changing a menu option). The log,
 `UntilDawnRT.log`, is next to the exe.

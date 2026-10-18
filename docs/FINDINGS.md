@@ -190,3 +190,49 @@ game thread) whenever the HDR state, `r.HDR.Display.MinLuminanceLog10`, `.MidLum
 off), and forces `MaxLuminance`, `MidLuminance` and `UI.Luminance` at console priority.
 `IConsoleVariable::Set` from the present (RHI) thread still makes the game thread run the
 sinks. Confirmed in game: the cached nits follow the slider (3700) and highlights brighten.
+
+## RT menu options → cvars
+
+The menu setters only store fields in `UBatesGameUserSettings` (+0x4ae ray tracing, +0x4af
+RT reflections, +0x4b0 RT AO, +0x4b1 enhanced mode). `ApplyNonResolutionSettings`
+(exe+0x457ea00) turns them into cvars:
+
+| field | cvar | value, priority |
+|---|---|---|
+| ray tracing | `r.RayTracing.ForceAllRayTracingEffects` | -1 (per effect) if on and `GRHISupportsRayTracing`, else **0 (all RT effects off)**; 0x02 |
+| RT reflections | `r.BM.AllowRTReflections` | 0/1; 0x0a |
+| enhanced mode | `r.RayTracing.Enable.BMEnhancedMode` | 0/1/2; 0x02 |
+| RT AO (only if RT on and supported) | `r.Raytracing.AmbientOcclusion` | 0/1; 0x02 |
+
+`r.RayTracing.Enable` is never touched (stays 1). The support flag (exe+0x88f1ccc) is the
+engine's own, set at D3D12 init and read by `ShouldRenderRayTracingEffect`. Compiled ray-gen
+shaders: `OcclusionRGS` (RT shadows, 192 permutations), `AmbientOcclusionRGS`,
+`RayTracingReflectionsRGS`, `RayTracingDeferredReflectionsRGS`, plus PSAcoustics' audio rays
+(`AudioReflectionRGSBackwardTrace`, `AudioObstructionRayRGS`).
+
+## Why RT shows so little (2026-10-18)
+
+- The probe's command counters were first sampled per present and read 0 draws; over one
+  second (146 presents) they read 24747 draws, 33300 compute dispatches, 1898 BLAS and 146
+  TLAS builds, so the hooks work and the game keeps an RT scene.
+- With the menu's Ray Tracing, RT reflections and RT AO on (enhanced mode 0), exactly one RT
+  pipeline dispatches: 73 times a second (every other frame) at the render resolution
+  (2228x1253 at 4K output). It is a linked pipeline (built with `AddToStateObject`, which
+  ReShade doesn't report), so it has no name from creation.
+- RT reflections are gated per frame in `UWorld::AddPostProcessingSettings`
+  (exe+0x3637c82): `r.RayTracing.Reflections` is set at priority 0x0a to 1 only when a
+  blended post-process value is above 0.7 (designer-marked volumes) **and**
+  `r.BM.AllowRTReflections` is 1, else 0. Even then `MaxRoughness` 0.01 limits them to
+  mirrors. `r.Shadow.Virtual.Enable` gets the same per-volume treatment right after.
+- RT shadows need `BMEnhancedMode` 2 (lights default to `CastRaytracedShadow = Disabled`).
+
+## Result (0.0.6)
+
+Forcing at console priority (0x0b, above the game's per-frame 0x0a writes), with the menu's
+Ray Tracing option on: `BMEnhancedMode` 2 (RT shadows on every light) and
+`r.RayTracing.Reflections` 1 (following `r.BM.AllowRTReflections`) with `MaxRoughness` 0.4.
+Confirmed in game: RT shadows and RT AO visibly work, reflections run (a new pipeline,
+765 dispatches/s as a 2867200x1 = 2240x1280 sorted-ray dispatch), and the settings apply by
+themselves after a restart. Cost in one test at 4K output: 146 → 90 fps with everything on.
+The linked pipelines' ray generation exports are renamed, so `GetShaderIdentifier` with the
+library names finds none.

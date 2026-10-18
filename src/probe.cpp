@@ -9,7 +9,7 @@
 //
 // It also counts the ray tracing work the GPU actually does: every DispatchRays, grouped
 // by the ray tracing pipeline bound for it (named by its shaders' export names), shown
-// live for the last frame.
+// live for the last second.
 //
 // HDR (0.0.4): turning HDR on shows the UI over a black scene. The HDR switches force the
 // cvars on that path (the Uniform Colour Pipeline, output device, UI composite, calibration
@@ -22,19 +22,21 @@
 //   UntilDawnRT.log  the census (every cvar matching kPrefixes: type, kind, main and
 //                    renderer values, priority), the layout check, every override and
 //                    release, later snapshots' changes (e.g. after a menu change), every
-//                    ray tracing pipeline the game creates, and one-frame dispatch logs
+//                    ray tracing pipeline the game creates, and one-second work logs
 //
 // Overrides are session-only in phase 0: mode 2 is documented as very slow, so nothing is
 // forced at start.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <d3d12.h>
 
 #define ImTextureID ImU64
 #include <imgui.h>
 #include <reshade.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -311,6 +313,7 @@ std::mutex g_rtMutex;  // pipeline events come from the game's pipeline compile 
 uint32_t g_rtPipelines = 0;
 std::map<uint64_t, std::string> g_pipelineNames;  // pipeline handle -> its shaders' export names
 std::map<command_list*, uint64_t> g_boundRt;      // ray tracing pipeline bound on each command list
+std::set<std::string> g_raygenNames;               // ray generation shader names seen in libraries
 struct DispatchStat {
     uint32_t count = 0, width = 0, height = 0;
 };
@@ -378,7 +381,11 @@ void OnInitPipeline(device*, pipeline_layout, uint32_t count, const pipeline_sub
             auto descs = static_cast<const shader_desc*>(s.data);
             for (uint32_t j = 0; j < s.count; ++j) {
                 if (descs[j].entry_point) AddNames(names, {descs[j].entry_point});
-                AddNames(names, RdatNames(descs[j].code, descs[j].code_size));
+                std::vector<std::string> rdat = RdatNames(descs[j].code, descs[j].code_size);
+                AddNames(names, rdat);
+                for (const std::string& n : rdat)
+                    if (n.find("RGS") != std::string::npos && n.find_first_of("?@") == std::string::npos)
+                        g_raygenNames.insert(n);
             }
             shaders += s.count;
         } else if (s.type == pipeline_subobject_type::libraries) {
@@ -402,14 +409,69 @@ void OnBindPipeline(command_list* cmd, pipeline_stage stages, pipeline pipe) {
     g_boundRt[cmd] = pipe.handle;
 }
 
+// The pipelines the game dispatches are linked from the libraries above with AddToStateObject,
+// which ReShade doesn't report, so they have no name. The first time one is dispatched, ask
+// the state object which of the ray generation exports seen in the libraries it can find.
+// (If the game renamed the exports when linking, none match and it stays unnamed.)
+void NameFromExports(uint64_t handle) {
+    if (!handle || g_pipelineNames.count(handle)) return;
+    std::string names;
+    auto unknown = reinterpret_cast<IUnknown*>(handle);
+    ID3D12StateObjectProperties* props = nullptr;
+    if (SUCCEEDED(unknown->QueryInterface(IID_PPV_ARGS(&props)))) {
+        for (const std::string& n : g_raygenNames) {
+            std::wstring wide(n.begin(), n.end());
+            if (props->GetShaderIdentifier(wide.c_str())) names += names.empty() ? n : ", " + n;
+        }
+        props->Release();
+    }
+    g_pipelineNames[handle] = names;
+    Log("rt pipeline %016llx (linked, first dispatch): ray generation %s", static_cast<unsigned long long>(handle),
+        names.empty() ? "not found among the library exports" : names.c_str());
+}
+
 bool OnDispatchRays(command_list* cmd, resource, uint64_t, uint64_t, resource, uint64_t, uint64_t, uint64_t, resource,
                     uint64_t, uint64_t, uint64_t, resource, uint64_t, uint64_t, uint64_t, uint32_t width, uint32_t height,
                     uint32_t) {
     std::lock_guard lock(g_rtMutex);
-    DispatchStat& s = g_frameDispatches[g_boundRt[cmd]];
+    uint64_t bound = g_boundRt[cmd];
+    NameFromExports(bound);
+    DispatchStat& s = g_frameDispatches[bound];
     ++s.count;
     s.width = width;
     s.height = height;
+    return false;
+}
+
+// Sanity counters, per frame: if draws and compute dispatches count but rays don't, the
+// hooks work and the game isn't tracing; acceleration structure builds show whether it
+// keeps a ray tracing scene at all.
+struct WorkCounts {
+    uint32_t draws = 0, dispatches = 0, blasBuilds = 0, tlasBuilds = 0;
+};
+std::atomic<uint32_t> g_draws{0}, g_computeDispatches{0}, g_blasBuilds{0}, g_tlasBuilds{0};
+WorkCounts g_lastWork;
+
+bool OnDraw(command_list*, uint32_t, uint32_t, uint32_t, uint32_t) {
+    g_draws.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+bool OnDrawIndexed(command_list*, uint32_t, uint32_t, uint32_t, int32_t, uint32_t) {
+    g_draws.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+bool OnDispatch(command_list*, uint32_t, uint32_t, uint32_t) {
+    g_computeDispatches.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+bool OnBuildAccelerationStructure(command_list*, acceleration_structure_type type, acceleration_structure_build_flags,
+                                  uint32_t, const acceleration_structure_build_input*, resource, uint64_t,
+                                  resource_view, resource_view, acceleration_structure_build_mode) {
+    (type == acceleration_structure_type::top_level ? g_tlasBuilds : g_blasBuilds)
+        .fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
@@ -418,14 +480,32 @@ std::string PipelineName(uint64_t handle) {
     return it == g_pipelineNames.end() || it->second.empty() ? "unnamed" : it->second;
 }
 
-// Called at present: the frame's dispatches become the last frame's.
+void LogRtState();
+
+// The counts are totals over one second, not one present: with frame generation (FSR 3's
+// swap chain) every other present is an interpolated frame with no rendering work of its own.
+constexpr uint64_t kWindowMs = 1000;
+uint64_t g_windowStart = 0;
+uint32_t g_windowPresents = 0, g_lastPresents = 0;
+
+// Called at every present: when a second has passed, its counts become the last window's.
 void EndFrameDispatches() {
     std::lock_guard lock(g_rtMutex);
+    ++g_windowPresents;
+    uint64_t now = GetTickCount64();
+    if (now - g_windowStart < kWindowMs) return;
+    g_windowStart = now;
+    g_lastPresents = g_windowPresents;
+    g_windowPresents = 0;
     g_lastDispatches.swap(g_frameDispatches);
     g_frameDispatches.clear();
+    g_lastWork = {g_draws.exchange(0), g_computeDispatches.exchange(0), g_blasBuilds.exchange(0), g_tlasBuilds.exchange(0)};
     if (!g_logDispatches) return;
     g_logDispatches = false;
-    Log("ray dispatches in one frame: %zu pipelines", g_lastDispatches.size());
+    LogRtState();
+    Log("work in one second (%u presents): %u draws, %u compute dispatches, %u BLAS builds, %u TLAS builds",
+        g_lastPresents, g_lastWork.draws, g_lastWork.dispatches, g_lastWork.blasBuilds, g_lastWork.tlasBuilds);
+    Log("ray dispatches in one second: %zu pipelines", g_lastDispatches.size());
     for (auto& [handle, s] : g_lastDispatches)
         Log("  pipeline %016llx: %u dispatches, last %ux%u (%s)", static_cast<unsigned long long>(handle), s.count,
             s.width, s.height, PipelineName(handle).c_str());
@@ -462,23 +542,34 @@ struct Override {
     std::wstring original;  // main value before we forced it
     uint32_t originalFlags = 0;
     uint32_t repairs = 0;
+    bool driven = false;  // set by the saved Ray tracing settings: locked in the switches table
 };
 
 std::vector<Override> g_overrides;
 
 void DefineOverrides() {
     g_overrides = {
+        {Group::RayTracing, L"r.RayTracing.ForceAllRayTracingEffects", "RT master switch",
+         "What the game's Ray Tracing menu option sets: 0 with it off, which turns every RT effect off whatever "
+         "the other switches say.\n-1: each effect's own setting decides (the menu option on)\n0: all RT effects "
+         "off\n1: all RT effects on",
+         {{-1, "-1 Per effect"}, {0, "0 All off"}, {1, "1 All on"}}},
         {Group::RayTracing, L"r.RayTracing.Enable.BMEnhancedMode", "Enhanced RT mode",
          "Ballistic Moon's gate on which lights may cast ray traced shadows (and on RT in reflections and sky light).\n"
          "0: lights marked Disabled (the project default) and Enhanced-only get none\n"
          "1: Enhanced-only lights get RT shadows too\n"
          "2: every light, whatever its setting (the help text warns: very slow)",
          {{0, "0 Off"}, {1, "1 Enhanced"}, {2, "2 Everywhere"}}},
+        {Group::RayTracing, L"r.RayTracing.AmbientOcclusion", "RT ambient occlusion",
+         "UE's ray traced ambient occlusion (the menu's RT AO option sets it).\n-1: post-process volume decides\n"
+         "0: off\n1: on",
+         {{-1, "-1 Volume"}, {0, "0 Off"}, {1, "1 On"}}},
         {Group::RayTracing, L"r.BM.AllowRTReflections", "Allow RT reflections",
          "Ballistic Moon's reflection setting.\n0: always off\n1: on in areas where supported",
          {{0, "0 Off"}, {1, "1 Where supported"}}},
         {Group::RayTracing, L"r.RayTracing.Reflections", "RT reflections",
-         "UE's ray traced reflections switch. The game sets it from code (0 in the first test).\n"
+         "UE's ray traced reflections switch. The game sets it every frame from code: 1 only inside post-process "
+         "volumes marked for RT reflections, and only if Allow RT reflections is 1; 0 elsewhere.\n"
          "-1: post-process volume decides\n0: off\n1: on",
          {{-1, "-1 Volume"}, {0, "0 Off"}, {1, "1 On"}}},
         {Group::RayTracing, L"r.RayTracing.Reflections.MaxRoughness", "Reflections max roughness",
@@ -759,6 +850,72 @@ void ApplyBrightness() {
         }
 }
 
+// ---------------------------------------------------------------- ray tracing settings
+
+// The game's RT barely shows (docs/FINDINGS.md, "Why RT shows so little"): lights opt out of
+// RT shadows unless BMEnhancedMode is 2, and RT reflections are switched on per frame only
+// inside designer-marked volumes, for mirror-like surfaces. These saved settings force them
+// at console priority, which outranks the game's per-frame writes. The game's menu still
+// rules: with its Ray Tracing option off, ForceAllRayTracingEffects 0 keeps every effect
+// off, and reflections follow its RT reflections option (r.BM.AllowRTReflections).
+
+enum RtShadows : int { kShadowsGame = 0, kShadowsEnhanced = 1, kShadowsAll = 2 };
+
+struct RtSettings {
+    bool on = true;  // with nothing saved: on, shadows on every light, reflections everywhere
+    int shadows = kShadowsAll;
+    bool reflectionsEverywhere = true;
+    float maxRoughness = 0.4f;
+    bool initialised = false;
+};
+RtSettings g_rt;
+
+void SaveRt() {
+    reshade::set_config_value(nullptr, kConfigSection, "RtOverride", g_rt.on);
+    reshade::set_config_value(nullptr, kConfigSection, "RtShadows", g_rt.shadows);
+    reshade::set_config_value(nullptr, kConfigSection, "RtReflectionsEverywhere", g_rt.reflectionsEverywhere);
+    reshade::set_config_value(nullptr, kConfigSection, "RtReflectionsMaxRoughness", g_rt.maxRoughness);
+}
+
+void InitRt() {
+    g_rt.initialised = true;
+    bool saved = reshade::get_config_value(nullptr, kConfigSection, "RtOverride", g_rt.on);
+    if (saved) {
+        reshade::get_config_value(nullptr, kConfigSection, "RtShadows", g_rt.shadows);
+        reshade::get_config_value(nullptr, kConfigSection, "RtReflectionsEverywhere", g_rt.reflectionsEverywhere);
+        reshade::get_config_value(nullptr, kConfigSection, "RtReflectionsMaxRoughness", g_rt.maxRoughness);
+    }
+    Log("ray tracing: %s, override %s: shadows %d, reflections %s, max roughness %g",
+        saved ? "from ReShade.ini" : "defaults", g_rt.on ? "on" : "off", g_rt.shadows,
+        g_rt.reflectionsEverywhere ? "everywhere" : "game", g_rt.maxRoughness);
+}
+
+// Drives (or releases) one override from the settings.
+void Drive(const wchar_t* cvar, bool want, float value) {
+    Override* o = FindOverride(cvar);
+    if (!o) return;
+    if (want) {
+        o->driven = true;
+        o->wanted = true;
+        o->value = value;
+    } else if (o->driven) {
+        o->driven = false;
+        o->wanted = false;  // hand it back to the game
+    }
+}
+
+// Every frame, before ApplyOverrides.
+void ApplyRt() {
+    if (!g_rt.initialised) InitRt();
+    Drive(L"r.RayTracing.Enable.BMEnhancedMode", g_rt.on && g_rt.shadows != kShadowsGame,
+          static_cast<float>(g_rt.shadows));
+    bool reflections = g_rt.on && g_rt.reflectionsEverywhere;
+    // The game's own gate also requires its menu option: keep that working.
+    float allowed = RendererValue(L"r.BM.AllowRTReflections", 0) == 1 ? 1.0f : 0.0f;
+    Drive(L"r.RayTracing.Reflections", reflections, allowed);
+    Drive(L"r.RayTracing.Reflections.MaxRoughness", reflections, g_rt.maxRoughness);
+}
+
 // ---------------------------------------------------------------- events
 
 constexpr uint64_t kCensusFrame = 600;  // ~10 s in: plugins have registered their cvars by then
@@ -803,6 +960,50 @@ void TrackSwapchain(swapchain* sc) {
     Log("swap chain: back buffer %s (%u), colour space %s", FormatName(f), static_cast<uint32_t>(f), ColorSpaceName(c));
 }
 
+// The cvars that decide which RT effects run, logged with each one-second work log so
+// every log entry says what state it was taken in.
+const wchar_t* const kRtState[] = {
+    L"r.RayTracing.Enable",
+    L"r.RayTracing.ForceAllRayTracingEffects",
+    L"r.RayTracing.Enable.BMEnhancedMode",
+    L"r.RayTracing.Shadows",
+    L"r.RayTracing.AmbientOcclusion",
+    L"r.RayTracing.Reflections",
+    L"r.BM.AllowRTReflections",
+    L"r.RayTracing.Reflections.MaxRoughness",
+    L"r.Shadow.Virtual.Enable",
+};
+
+// UBatesGameUserSettings fields the RT menu options write, applied as cvars by
+// ApplyNonResolutionSettings (docs/FINDINGS.md, "RT menu options").
+constexpr uint32_t kMenuRayTracing = 0x4ae, kMenuRtReflections = 0x4af, kMenuRtAo = 0x4b0, kMenuEnhanced = 0x4b1;
+// GRHIGlobals' "supports ray tracing shaders" (full pipelines), which the menu's ray tracing
+// option also requires.
+constexpr uint32_t kRhiSupportsRtShadersRva = 0x88f1ccc;
+
+uint8_t* UserSettings();
+
+void LogRtState() {
+    uint8_t menu[4] = {0xff, 0xff, 0xff, 0xff}, rhi = 0xff;
+    if (uint8_t* s = UserSettings()) cvars::SafeCopy(menu, s + kMenuRayTracing, 4);
+    if (g_timestamp == kKnownTimestamp) cvars::SafeCopy(&rhi, g_base + kRhiSupportsRtShadersRva, 1);
+    Log("rt menu: ray tracing %u, RT reflections %u, RT AO %u, enhanced mode %u; RHI supports RT shaders %u",
+        menu[kMenuRayTracing - kMenuRayTracing], menu[kMenuRtReflections - kMenuRayTracing],
+        menu[kMenuRtAo - kMenuRayTracing], menu[kMenuEnhanced - kMenuRayTracing], rhi);
+    std::string line;
+    for (const wchar_t* name : kRtState) {
+        void* var = g_manager ? cvars::FindVariable(g_manager, name) : nullptr;
+        Reading r = var ? Read(var) : Reading{};
+        char buf[96];
+        if (r.ok)
+            snprintf(buf, sizeof(buf), "%s %g", Narrow(name).c_str(), r.render);
+        else
+            snprintf(buf, sizeof(buf), "%s ?", Narrow(name).c_str());
+        line += line.empty() ? buf : std::string(", ") + buf;
+    }
+    Log("rt state: %s", line.c_str());
+}
+
 void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t, const rect*) {
     std::lock_guard lock(g_mutex);
     ++g_frames;
@@ -813,6 +1014,7 @@ void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t
     }
     if (FindManager()) {
         ApplyBrightness();
+        ApplyRt();
         ApplyOverrides();
         if (g_frames % 60 == 0) CheckOverrides();
     }
@@ -890,6 +1092,14 @@ void DrawOverride(Override& o) {
         ImGui::PopID();
         return;
     }
+    if (o.driven) {
+        ImGui::TextDisabled("set by Ray tracing settings above");
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        if (r.ok) ImGui::TextDisabled("renderer: %g", r.render);
+        ImGui::PopID();
+        return;
+    }
     double game = o.active ? wcstod(o.original.c_str(), nullptr) : r.render;
     char gameLabel[48];
     snprintf(gameLabel, sizeof(gameLabel), "Game (%g)", game);
@@ -920,6 +1130,37 @@ void DrawOverride(Override& o) {
     ImGui::AlignTextToFramePadding();
     if (r.ok) ImGui::TextDisabled("renderer: %g", r.render);
     ImGui::PopID();
+}
+
+// Saved ray tracing settings.
+void DrawRt() {
+    bool changed = ImGui::Checkbox("Improve the game's ray tracing", &g_rt.on);
+    ImGui::SetItemTooltip("Kept in ReShade.ini and applied every time the game starts. The game's Ray Tracing menu "
+                          "option must be on.");
+    if (!g_rt.on) ImGui::BeginDisabled();
+    const char* shadows[] = {"Game (most lights opt out)", "Lights marked enhanced", "All lights"};
+    changed |= ImGui::Combo("RT shadows", &g_rt.shadows, shadows, 3);
+    ImGui::SetItemTooltip("r.RayTracing.Enable.BMEnhancedMode. All lights is the most visible and the most costly.");
+    const char* reflections[] = {"Game (marked areas, mirrors only)", "Everywhere"};
+    int r = g_rt.reflectionsEverywhere ? 1 : 0;
+    if (ImGui::Combo("RT reflections", &r, reflections, 2)) {
+        g_rt.reflectionsEverywhere = r == 1;
+        changed = true;
+    }
+    ImGui::SetItemTooltip("Everywhere: r.RayTracing.Reflections on outside the game's marked areas too. Follows the "
+                          "game's RT reflections menu option.");
+    if (!g_rt.reflectionsEverywhere) ImGui::BeginDisabled();
+    ImGui::SliderFloat("Reflections max roughness", &g_rt.maxRoughness, 0.01f, 1.0f, "%.2f",
+                       ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SetItemTooltip("Surfaces rougher than this keep screen space and probe reflections. The game ships 0.01 "
+                          "(mirrors only); higher costs more and can look noisier.");
+    if (!g_rt.reflectionsEverywhere) ImGui::EndDisabled();
+    if (!g_rt.on) ImGui::EndDisabled();
+    if (changed) SaveRt();
+    if (RendererValue(L"r.RayTracing.ForceAllRayTracingEffects", -1) == 0)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "Ray tracing is off in the game's graphics menu: every RT effect is off.");
 }
 
 // Peak, paper white and UI sliders; saved to ReShade.ini when a slider is let go.
@@ -1017,6 +1258,9 @@ void DrawOverlay(effect_runtime*) {
     ImGui::SeparatorText("HDR brightness");
     DrawBrightness();
 
+    ImGui::SeparatorText("Ray tracing");
+    DrawRt();
+
     ImGui::SeparatorText("HDR");
     ImGui::Text("Swap chain: %s, %s", FormatName(g_backBufferFormat), ColorSpaceName(g_colorSpace));
     DrawSwitches(Group::Hdr);
@@ -1025,16 +1269,18 @@ void DrawOverlay(effect_runtime*) {
         ImGui::TreePop();
     }
 
-    ImGui::SeparatorText("Ray tracing switches");
+    ImGui::SeparatorText("Ray tracing test switches");
     DrawSwitches(Group::RayTracing);
-    ImGui::TextDisabled("Session only: nothing is forced when the game starts.");
+    ImGui::TextDisabled("Session only: not saved.");
 
     ImGui::SeparatorText("Related values (renderer's copy)");
     DrawWatched("##watched", kWatched, std::size(kWatched));
 
-    ImGui::SeparatorText("Ray tracing work (last frame)");
+    ImGui::SeparatorText("Ray tracing work (last second)");
     {
         std::lock_guard rtLock(g_rtMutex);
+        ImGui::TextDisabled("%u presents: %u draws, %u compute dispatches, %u BLAS / %u TLAS builds", g_lastPresents,
+                            g_lastWork.draws, g_lastWork.dispatches, g_lastWork.blasBuilds, g_lastWork.tlasBuilds);
         if (g_lastDispatches.empty()) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "No rays dispatched (%u RT pipelines created so far)",
                                g_rtPipelines);
@@ -1053,7 +1299,7 @@ void DrawOverlay(effect_runtime*) {
             ImGui::EndTable();
         }
     }
-    if (ImGui::Button("Log ray dispatches (one frame)")) g_logDispatches = true;
+    if (ImGui::Button("Log ray tracing work (one second)")) g_logDispatches = true;
 
     ImGui::SeparatorText("Diagnostics");
     if (ImGui::Button("Snapshot cvars")) g_snapshotRequested = true;
@@ -1072,6 +1318,10 @@ void Install() {
     reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
     reshade::register_event<reshade::addon_event::bind_pipeline>(&OnBindPipeline);
     reshade::register_event<reshade::addon_event::dispatch_rays>(&OnDispatchRays);
+    reshade::register_event<reshade::addon_event::draw>(&OnDraw);
+    reshade::register_event<reshade::addon_event::draw_indexed>(&OnDrawIndexed);
+    reshade::register_event<reshade::addon_event::dispatch>(&OnDispatch);
+    reshade::register_event<reshade::addon_event::build_acceleration_structure>(&OnBuildAccelerationStructure);
     reshade::register_overlay(UDRT_PRODUCT, &DrawOverlay);
 }
 

@@ -5,8 +5,8 @@
 #define UDRT_GAME "Until Dawn"
 #define UDRT_VERSION_MAJOR 0
 #define UDRT_VERSION_MINOR 0
-#define UDRT_VERSION_PATCH 5
-#define UDRT_VERSION "0.0.5"
+#define UDRT_VERSION_PATCH 6
+#define UDRT_VERSION "0.0.6"
 #define UDRT_RC_FILENAME "UntilDawnRT.addon64"
 #define UDRT_RC_PRODUCT "UntilDawnRT for Until Dawn"
 #define UDRT_RC_DESCRIPTION "UntilDawnRT ReShade add-on"
