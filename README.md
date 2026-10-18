@@ -23,7 +23,7 @@ It has no effect in SDR. With it, the game's HDR brightness sliders do nothing; 
 
 ## The add-on
 
-**Status: 0.0.8.** The overlay tab shows the two saved sections below; everything else is
+**Version 1.0.0.** The overlay tab shows the two saved sections below; everything else is
 under a collapsed **Advanced** header.
 
 **Ray tracing** (on by default, saved in `ReShade.ini`, applied at every start). Turn the

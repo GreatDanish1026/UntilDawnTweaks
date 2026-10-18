@@ -1,7 +1,7 @@
 Third-party notices
 ===================
 
-UntilDawnRT.addon64 is compiled against the following headers, which are
+UntilDawnTweaks.addon64 is compiled against the following headers, which are
 included in the source repository under third_party/.
 
 ----------------------------------------------------------------------------
