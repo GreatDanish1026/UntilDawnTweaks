@@ -112,3 +112,81 @@ At launch (October 2024), reviewers saw no visible difference with RT on, and pa
 listed "Raytracing tweaks". Players later reported RT as subtle or noisy in dark scenes.
 The settings above are consistent with that: reflections limited to mirrors in curated
 areas, and lights opted out of RT shadows.
+
+## HDR (black screen)
+
+Turning HDR on in the menu calls `UBatesGameUserSettings::SetHDREnabled` (exe+0x4594e20) →
+`UGameUserSettings::EnableHDRDisplayOutput(on, HDRDisplayOutputNits)` → `r.HDR.EnableHDROutput`,
+then `HDRConfigureCVars` (exe+0x22119e0) picks the output device:
+
+```
+device, gamut = 0, 0
+if on and GPU is AMD/NVIDIA: device = (nits == 1000) ? 3 : 4; gamut = 2   # ACES PQ, Rec2020
+if device == 0 and r.UCP.SDR: device = 10        # Uniform Colour Pipeline SDR
+if device in (3, 4) and r.UCP.HDR: device = 11   # UCP HDR
+if device in (5, 6) and r.UCP.HDR: device = 12   # UCP scRGB
+r.HDR.Display.OutputDevice = device (priority 0x05); ColorGamut = gamut
+then builds the ACES tone curve (init_TsParams) from MinLuminanceLog10, nits, MidLuminance
+```
+
+`r.UCP.HDR` defaults to 1 (set by nothing else; priority 0x00), so HDR always runs through the
+game's own Uniform Colour Pipeline (device 11), which is not stock UE. Intel GPUs get device 0
+(SDR encoding in an HDR swap chain).
+
+The menu's HDR sliders (`UBatesGameUserSettings` +0x4e8..+0x4f8, percentages) are mapped by
+`UpdateHDRValues` (exe+0x459a520) with `MapRangeClamped(x, 0, 100, lo, hi)`:
+
+| field | cvar | range | default |
+|---|---|---|---|
+| +0x4e8 exposure | `r.UCP.ExposureAdjust` | 0 – 10 | 50 % (5) |
+| +0x4ec min lum | `r.UCP.HDR.BMMinLuminanceOverride`, `r.HDRCalibrateScreen.SetLum.Min` | 0 – 0.1, 0 – 1 | 0 |
+| +0x4f0 max lum | `r.UCP.HDR.BMMaxLuminanceOverride` (PQ), `r.HDRCalibrateScreen.SetLum.Max` | 0.5 – 1, 0 – 1 | 50 % (PQ 0.75 ≈ 1000 nits) |
+| +0x4f4 shadow cutoff | `r.UCP.DisplayGrade.ShadowCutoff` | 0 – 1 | 10 % |
+| +0x4f8 shadow gamma | `r.UCP.DisplayGrade.ShadowGamma` | 0 – 4 | 33 % (1.32) |
+
+Defaults come from `SetToDefaults`. Other UCP cvars: `r.UCP.SDROutputTransfer`,
+`r.UCP.HDRCalibrationMinLumAdjust`, `r.UCP.DisplayGrade`, `r.HDR.UI.CompositeMode`.
+
+The FSR 3 swap-chain wrapper (`FFXD3D12SwapChain`) forwards `SetColorSpace1` and
+`SetHDRMetaData` to the real swap chain correctly (vtable +0x130/+0x140).
+
+First test: `r.UCP.HDR=0` in the user Engine.ini
+(`Documents\My Games\Bates\Saved\Config\Windows\Engine.ini`, `[SystemSettings]`), so HDR uses
+stock ACES 1000-nit PQ (device 3).
+
+First test result (2026-10-18): `r.UCP.HDR=0` in the user Engine.ini made no difference (not
+confirmed that the game read it). A ReShade screenshot with HDR on shows the menu UI drawn
+normally (PQ-encoded, so grey in a PNG) over a fully black scene. The swap chain and the UI
+pass work; the scene is lost in tonemapping or in the scene/UI composite. 0.0.4 adds live HDR
+switches (UCP, output device, gamut, UI composite mode, calibration screen) to find which.
+
+**Cause found (0.0.4, 2026-10-18):** forcing `r.UCP.HDR` to 0 live brings the scene back with
+HDR on; no other switch (output device, gamut, UI composite mode, calibration screen, UCP
+exposure or max luminance) does. The game's Uniform Colour Pipeline HDR path is what blacks
+out the scene; UE's stock ACES PQ path works. The first Engine.ini test had no effect because
+it went to `Documents\...`, while this PC's Documents folder is redirected to OneDrive: the game
+reads `%USERPROFILE%\OneDrive\Documents\My Games\Bates\Saved\Config\Windows\Engine.ini`. The
+fix is `r.UCP.HDR=0` under `[SystemSettings]` there.
+
+## HDR brightness (stock ACES path)
+
+With `r.UCP.HDR=0` the game's HDR sliders do nothing (they only drive `r.UCP.*`). The stock
+tone curve is rebuilt by `HDRSettingChangedSinkCallback` (exe+0x35d3dd0, a cvar sink on the
+game thread) whenever the HDR state, `r.HDR.Display.MinLuminanceLog10`, `.MidLuminance`,
+`.MaxLuminance`, `r.HDR.Aces.SceneColorMultiplier`, `r.UCP.HDR`/`SDR`, or
+`UGameUserSettings::GetCurrentHDRDisplayNits()` changes. It calls
+`HDRConfigureCVars(hdr, nits, false)` and caches the nits at exe+0x85d3140.
+
+- The peak is that nits argument, not a cvar: `HDRConfigureCVars` builds the curve from it and
+  then sets `r.HDR.Display.MaxLuminance` to it.
+- `GetCurrentHDRDisplayNits` returns `HDRDisplayOutputNits` (+0x110) only if
+  `bUseHDRDisplayOutput` (+0x10c) is set, else 0, and the sink then uses 1000. The game
+  leaves the flag at 0 even with HDR on, so the curve is always built for 1000 nits.
+- `GEngine` is exe+0x8994070; `UEngine::GameUserSettings` is at +0x2a0.
+- Paper white: `r.HDR.Display.MidLuminance` is nits at 18 % grey (default 15, i.e. about
+  83-nit paper white). UI: `r.HDR.UI.Luminance` (default 300).
+
+0.0.5 writes the nits and sets the flag while HDR output is on (restoring both when turned
+off), and forces `MaxLuminance`, `MidLuminance` and `UI.Luminance` at console priority.
+`IConsoleVariable::Set` from the present (RHI) thread still makes the game thread run the
+sinks. Confirmed in game: the cached nits follow the slider (3700) and highlights brighten.

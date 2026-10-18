@@ -11,6 +11,13 @@
 // by the ray tracing pipeline bound for it (named by its shaders' export names), shown
 // live for the last frame.
 //
+// HDR (0.0.4): turning HDR on shows the UI over a black scene. The HDR switches force the
+// cvars on that path (the Uniform Colour Pipeline, output device, UI composite, calibration
+// screen) and the HDR readout shows them with the swap chain's format and colour space.
+//
+// HDR brightness (0.0.5): with the pipeline off, the game's HDR sliders do nothing. Peak,
+// paper white and UI brightness sliders replace them, saved in ReShade.ini.
+//
 // What it records, next to the game executable:
 //   UntilDawnRT.log  the census (every cvar matching kPrefixes: type, kind, main and
 //                    renderer values, priority), the layout check, every override and
@@ -43,7 +50,7 @@
 
 extern "C" __declspec(dllexport) const char* NAME = UDRT_PRODUCT;
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Ray tracing probe for " UDRT_GAME " (DirectX 12): cvar layout check and live RT switches.";
+    "Ray tracing and HDR probe for " UDRT_GAME " (DirectX 12): cvar layout check and live RT and HDR switches.";
 
 namespace {
 
@@ -172,6 +179,7 @@ const wchar_t* const kPrefixes[] = {
     L"r.RayTracing", L"r.BM.", L"r.bm.", L"r.ReflectionMethod", L"r.DynamicGlobalIlluminationMethod",
     L"r.Shadow.Virtual.Enable", L"r.Lumen.Reflections.Allow", L"r.Lumen.HardwareRayTracing", L"r.D3D12.DXR",
     L"r.SSR.Quality", L"r.AmbientOcclusion", L"r.Shadow.Denoiser", L"r.Reflections.Denoiser",
+    L"r.HDR", L"r.UCP.", L"r.AllowHDR", L"r.Tonemapper",
 };
 
 std::vector<std::wstring> CollectNames() {
@@ -435,7 +443,10 @@ struct Choice {
     const char* label;
 };
 
+enum class Group { RayTracing, Hdr, Brightness };  // Brightness: driven by the HDR brightness sliders
+
 struct Override {
+    Group group;
     const wchar_t* cvar;
     const char* label;
     const char* help;
@@ -457,27 +468,63 @@ std::vector<Override> g_overrides;
 
 void DefineOverrides() {
     g_overrides = {
-        {L"r.RayTracing.Enable.BMEnhancedMode", "Enhanced RT mode",
+        {Group::RayTracing, L"r.RayTracing.Enable.BMEnhancedMode", "Enhanced RT mode",
          "Ballistic Moon's gate on which lights may cast ray traced shadows (and on RT in reflections and sky light).\n"
          "0: lights marked Disabled (the project default) and Enhanced-only get none\n"
          "1: Enhanced-only lights get RT shadows too\n"
          "2: every light, whatever its setting (the help text warns: very slow)",
          {{0, "0 Off"}, {1, "1 Enhanced"}, {2, "2 Everywhere"}}},
-        {L"r.BM.AllowRTReflections", "Allow RT reflections",
+        {Group::RayTracing, L"r.BM.AllowRTReflections", "Allow RT reflections",
          "Ballistic Moon's reflection setting.\n0: always off\n1: on in areas where supported",
          {{0, "0 Off"}, {1, "1 Where supported"}}},
-        {L"r.RayTracing.Reflections", "RT reflections",
+        {Group::RayTracing, L"r.RayTracing.Reflections", "RT reflections",
          "UE's ray traced reflections switch. The game sets it from code (0 in the first test).\n"
          "-1: post-process volume decides\n0: off\n1: on",
          {{-1, "-1 Volume"}, {0, "0 Off"}, {1, "1 On"}}},
-        {L"r.RayTracing.Reflections.MaxRoughness", "Reflections max roughness",
+        {Group::RayTracing, L"r.RayTracing.Reflections.MaxRoughness", "Reflections max roughness",
          "Surfaces rougher than this skip ray traced reflections. The project ships 0.01 (mirrors only); UE's default "
          "is 0.6.",
          {}, 0.0f, 1.0f},
-        {L"r.Shadow.Virtual.Enable", "Virtual shadow maps",
+        {Group::RayTracing, L"r.Shadow.Virtual.Enable", "Virtual shadow maps",
          "UE's virtual shadow maps (the game holds them on from code). Turning them off tests whether they hide "
          "ray traced shadows.",
          {{0, "0 Off"}, {1, "1 On"}}},
+        {Group::Hdr, L"r.UCP.HDR", "Uniform Colour Pipeline HDR",
+         "With HDR on, the game swaps UE's ACES PQ output (device 3/4) for its own Uniform Colour Pipeline "
+         "(device 11/12) when this is 1 (the default). The choice is made when HDR is switched on, so after changing "
+         "this, toggle HDR in the game menu, or force the output device below.",
+         {{0, "0 Off"}, {1, "1 On"}}},
+        {Group::Hdr, L"r.HDR.Display.OutputDevice", "Output device",
+         "How the tonemapper encodes the final image.\n"
+         "0 sRGB, 1 Rec709 (SDR)\n"
+         "3 ACES 1000 nit PQ, 4 ACES 2000 nit PQ (HDR10 swap chain)\n"
+         "5 ACES 1000 nit scRGB, 6 ACES 2000 nit scRGB (FP16 swap chain)\n"
+         "10 UCP SDR, 11 UCP HDR (PQ), 12 UCP scRGB HDR\n"
+         "With HDR on, the game picks 11.",
+         {{0, "0 sRGB"}, {3, "3 PQ 1000"}, {4, "4 PQ 2000"}, {5, "5 scRGB"}, {10, "10 UCP SDR"}, {11, "11 UCP HDR"},
+          {12, "12 UCP scRGB"}}},
+        {Group::Hdr, L"r.HDR.Display.ColorGamut", "Colour gamut",
+         "Gamut of the output.\n0 Rec709/sRGB, 1 DCI-P3, 2 Rec2020 (what the game uses with HDR on)",
+         {{0, "0 Rec709"}, {1, "1 P3"}, {2, "2 Rec2020"}}},
+        {Group::Hdr, L"r.HDR.UI.CompositeMode", "UI composite mode",
+         "How the UI is combined with the scene in HDR.\n0: standard compositing\n"
+         "1: shader pass to improve HDR blending (UE's default)",
+         {{0, "0 Standard"}, {1, "1 Shader pass"}}},
+        {Group::Hdr, L"r.HDRCalibrateScreen.ShowGame", "Calibration: show game",
+         "The HDR calibration screen's switch for drawing the game behind it.\n0: off\n1: on",
+         {{0, "0 Off"}, {1, "1 On"}}},
+        {Group::Hdr, L"r.HDRCalibrateScreen.Mode", "Calibration screen",
+         "The HDR calibration screen. If it is stuck on, it may hide the game.\n0: off\n1: max luminance\n"
+         "2: min luminance",
+         {{0, "0 Off"}, {1, "1 Max lum"}, {2, "2 Min lum"}}},
+        {Group::Hdr, L"r.UCP.ExposureAdjust", "UCP exposure",
+         "The menu's HDR brightness (0-100 %) mapped to 0-10. Default 5.", {}, 0.0f, 10.0f},
+        {Group::Hdr, L"r.UCP.HDR.BMMaxLuminanceOverride", "UCP max luminance (PQ)",
+         "The menu's HDR max luminance (0-100 %) mapped to PQ 0.5-1.0. Default 0.75 (about 1000 nits).", {}, 0.0f,
+         1.0f},
+        {Group::Brightness, L"r.HDR.Display.MaxLuminance", "Peak brightness", "", {}, 100.0f, 10000.0f},
+        {Group::Brightness, L"r.HDR.Display.MidLuminance", "Mid grey", "", {}, 1.0f, 200.0f},
+        {Group::Brightness, L"r.HDR.UI.Luminance", "UI brightness", "", {}, 50.0f, 1000.0f},
     };
 }
 
@@ -555,6 +602,163 @@ void CheckOverrides() {
     }
 }
 
+// ---------------------------------------------------------------- HDR brightness
+
+// With HDR on (and the Uniform Colour Pipeline off), the peak is not a cvar:
+// HDRSettingChangedSinkCallback (a cvar sink, on the game thread) rebuilds the tone curve with
+// HDRConfigureCVars whenever UGameUserSettings::GetCurrentHDRDisplayNits() or one of the cvars
+// it watches changes, then sets r.HDR.Display.MaxLuminance to those nits. That getter returns
+// 0 (and the sink then uses 1000) unless UGameUserSettings::bUseHDRDisplayOutput is set, which
+// the game leaves off even with HDR on. So the peak is written to
+// GEngine->GameUserSettings->HDRDisplayOutputNits, the flag is set while HDR output is on,
+// and r.HDR.Display.MaxLuminance
+// (a watched cvar) is forced to the same value, which makes the sink run. Paper white is set
+// through r.HDR.Display.MidLuminance (nits at 18% grey, also watched), the UI through
+// r.HDR.UI.Luminance. The values are kept in ReShade.ini and applied at every start.
+
+constexpr uint32_t kGEngineRva = 0x8994070;    // ?GEngine@@3PEAVUEngine@@EA
+constexpr uint32_t kGameUserSettings = 0x2a0;  // UEngine::GameUserSettings
+constexpr uint32_t kUseHdr = 0x10c;            // UGameUserSettings::bUseHDRDisplayOutput (bool)
+constexpr uint32_t kHdrNits = 0x110;           // UGameUserSettings::HDRDisplayOutputNits (int)
+// The nits HDRSettingChangedSinkCallback last built the tone curve for (its cached copy).
+constexpr uint32_t kSinkNitsRva = 0x85d3140;
+constexpr float kMidGrey = 0.18f;
+constexpr const char* kConfigSection = UDRT_PRODUCT;
+
+struct Brightness {
+    bool on = true;  // with nothing saved: on, at the game's own values
+    int peak = 1000, paper = 203, ui = 300;  // nits
+    bool initialised = false;                // from ReShade.ini, or else the game's values
+    bool nitsForced = false;
+    int originalNits = 0;  // the game's value, put back when the override is turned off
+    int written = 0;       // what we last wrote
+    uint32_t repairs = 0;
+    bool flagForced = false;
+    uint8_t originalFlag = 0;
+};
+Brightness g_bright;
+
+// GEngine->GameUserSettings, or null (other build, not created yet).
+uint8_t* UserSettings() {
+    if (g_timestamp != kKnownTimestamp) return nullptr;
+    uint8_t* engine = nullptr;
+    uint8_t* settings = nullptr;
+    if (!cvars::SafeCopy(&engine, g_base + kGEngineRva, 8) || !engine) return nullptr;
+    if (!cvars::SafeCopy(&settings, engine + kGameUserSettings, 8) || !settings) return nullptr;
+    return settings;
+}
+
+// The peak's home in the game's user settings, or null.
+int* NitsField() {
+    uint8_t* settings = UserSettings();
+    return settings ? reinterpret_cast<int*>(settings + kHdrNits) : nullptr;
+}
+
+Override* FindOverride(const wchar_t* cvar);
+
+// Sets bUseHDRDisplayOutput while the override is on and HDR output is on, so the sink reads
+// the nits; puts the game's value back otherwise.
+void ApplyUseHdrFlag(bool want) {
+    uint8_t* settings = UserSettings();
+    uint8_t flag = 0;
+    if (!settings || !cvars::SafeCopy(&flag, settings + kUseHdr, 1)) return;
+    if (want && flag == 0) {
+        if (!g_bright.flagForced) {
+            g_bright.flagForced = true;
+            g_bright.originalFlag = flag;
+            Log("brightness: bUseHDRDisplayOutput was 0; setting it so the tone curve uses the peak");
+        }
+        uint8_t one = 1;
+        cvars::SafeCopy(settings + kUseHdr, &one, 1);
+        // The sink may have built the curve while the flag was 0: set the peak cvar again
+        // (ApplyOverrides, this frame) so it runs once more.
+        if (Override* o = FindOverride(L"r.HDR.Display.MaxLuminance")) o->applied = -1;
+    } else if (!want && g_bright.flagForced) {
+        g_bright.flagForced = false;
+        cvars::SafeCopy(settings + kUseHdr, &g_bright.originalFlag, 1);
+        Log("brightness: bUseHDRDisplayOutput back to %u", g_bright.originalFlag);
+    }
+}
+
+Override* FindOverride(const wchar_t* cvar) {
+    for (Override& o : g_overrides)
+        if (wcscmp(o.cvar, cvar) == 0) return &o;
+    return nullptr;
+}
+
+double RendererValue(const wchar_t* cvar, double fallback) {
+    void* var = cvars::FindVariable(g_manager, cvar);
+    Reading r = var ? Read(var) : Reading{};
+    return r.ok ? r.render : fallback;
+}
+
+void SaveBrightness() {
+    reshade::set_config_value(nullptr, kConfigSection, "HdrBrightnessOverride", g_bright.on);
+    reshade::set_config_value(nullptr, kConfigSection, "HdrPeakNits", g_bright.peak);
+    reshade::set_config_value(nullptr, kConfigSection, "HdrPaperWhiteNits", g_bright.paper);
+    reshade::set_config_value(nullptr, kConfigSection, "HdrUiNits", g_bright.ui);
+}
+
+// Saved values if there are any; otherwise the override is on and the sliders start at the
+// game's values, so nothing looks different until one is moved.
+void InitBrightness() {
+    g_bright.initialised = true;
+    bool saved = reshade::get_config_value(nullptr, kConfigSection, "HdrBrightnessOverride", g_bright.on);
+    if (saved) {
+        reshade::get_config_value(nullptr, kConfigSection, "HdrPeakNits", g_bright.peak);
+        reshade::get_config_value(nullptr, kConfigSection, "HdrPaperWhiteNits", g_bright.paper);
+        reshade::get_config_value(nullptr, kConfigSection, "HdrUiNits", g_bright.ui);
+    } else {
+        int nits = 0;
+        if (int* field = NitsField(); field && cvars::SafeCopy(&nits, field, 4) && nits > 0) g_bright.peak = nits;
+        g_bright.paper = static_cast<int>(lround(RendererValue(L"r.HDR.Display.MidLuminance", 15) / kMidGrey));
+        g_bright.ui = static_cast<int>(lround(RendererValue(L"r.HDR.UI.Luminance", 300)));
+    }
+    Log("brightness: %s, override %s: peak %d, paper white %d, UI %d nits", saved ? "from ReShade.ini" : "game values",
+        g_bright.on ? "on" : "off", g_bright.peak, g_bright.paper, g_bright.ui);
+}
+
+// Every frame, before ApplyOverrides: keeps the nits field at the peak (the game may write
+// it back, e.g. when settings are applied) and drives the three cvar overrides.
+void ApplyBrightness() {
+    if (!g_bright.initialised) InitBrightness();
+    ApplyUseHdrFlag(g_bright.on && RendererValue(L"r.HDR.EnableHDROutput", 0) != 0);
+    int* field = NitsField();
+    int current = 0;
+    bool readable = field && cvars::SafeCopy(&current, field, 4);
+    if (g_bright.on && readable && current != g_bright.peak) {
+        if (!g_bright.nitsForced) {
+            g_bright.nitsForced = true;
+            g_bright.originalNits = current;
+            Log("brightness: peak %d nits (game had %d)", g_bright.peak, current);
+        } else if (current == g_bright.written) {
+            Log("brightness: peak %d nits", g_bright.peak);
+        } else if (++g_bright.repairs <= 5) {
+            Log("brightness: the game set HDR nits to %d; setting %d again%s", current, g_bright.peak,
+                g_bright.repairs == 5 ? " (not logging further repairs)" : "");
+        }
+        cvars::SafeCopy(field, &g_bright.peak, 4);
+        g_bright.written = g_bright.peak;
+    } else if (!g_bright.on && g_bright.nitsForced) {
+        g_bright.nitsForced = false;
+        if (readable) cvars::SafeCopy(field, &g_bright.originalNits, 4);
+        Log("brightness: override off, HDR nits back to %d", g_bright.originalNits);
+    }
+    struct {
+        const wchar_t* cvar;
+        float value;
+    } const drive[] = {
+        {L"r.HDR.Display.MaxLuminance", static_cast<float>(g_bright.peak)},
+        {L"r.HDR.Display.MidLuminance", g_bright.paper * kMidGrey},
+        {L"r.HDR.UI.Luminance", static_cast<float>(g_bright.ui)},
+    };
+    for (const auto& d : drive)
+        if (Override* o = FindOverride(d.cvar)) {
+            o->wanted = g_bright.on;
+            o->value = d.value;
+        }
+}
+
 // ---------------------------------------------------------------- events
 
 constexpr uint64_t kCensusFrame = 600;  // ~10 s in: plugins have registered their cvars by then
@@ -566,14 +770,49 @@ void OnInitDevice(device* dev) {
     Log("device created: %s", dev->get_api() == device_api::d3d12 ? "Direct3D 12" : "not Direct3D 12");
 }
 
-void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, const rect*) {
+// The swap chain's back buffer format and colour space, logged when they change.
+format g_backBufferFormat = format::unknown;
+color_space g_colorSpace = color_space::unknown;
+
+const char* ColorSpaceName(color_space c) {
+    switch (c) {
+        case color_space::srgb: return "sRGB";
+        case color_space::scrgb: return "scRGB (linear, FP16)";
+        case color_space::hdr10_st2084: return "HDR10 (Rec2020, PQ)";
+        case color_space::hdr10_hlg: return "HDR10 HLG";
+        default: return "unknown";
+    }
+}
+
+const char* FormatName(format f) {
+    switch (f) {
+        case format::r8g8b8a8_unorm: return "R8G8B8A8_UNORM";
+        case format::b8g8r8a8_unorm: return "B8G8R8A8_UNORM";
+        case format::r10g10b10a2_unorm: return "R10G10B10A2_UNORM";
+        case format::r16g16b16a16_float: return "R16G16B16A16_FLOAT";
+        default: return "other";
+    }
+}
+
+void TrackSwapchain(swapchain* sc) {
+    format f = sc->get_device()->get_resource_desc(sc->get_current_back_buffer()).texture.format;
+    color_space c = sc->get_color_space();
+    if (f == g_backBufferFormat && c == g_colorSpace) return;
+    g_backBufferFormat = f;
+    g_colorSpace = c;
+    Log("swap chain: back buffer %s (%u), colour space %s", FormatName(f), static_cast<uint32_t>(f), ColorSpaceName(c));
+}
+
+void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t, const rect*) {
     std::lock_guard lock(g_mutex);
     ++g_frames;
+    if (sc) TrackSwapchain(sc);
     if (g_frames == kCensusFrame || (g_snapshotRequested && g_frames > kCensusFrame)) {
         g_snapshotRequested = false;
         Snapshot();
     }
     if (FindManager()) {
+        ApplyBrightness();
         ApplyOverrides();
         if (g_frames % 60 == 0) CheckOverrides();
     }
@@ -587,6 +826,34 @@ const wchar_t* const kWatched[] = {
     L"r.RayTracing.Enable",       L"r.RayTracing.Shadows",           L"r.RayTracing.Reflections",
     L"r.RayTracing.AmbientOcclusion", L"r.ReflectionMethod",         L"r.Shadow.Virtual.Enable",
     L"r.BM.AllowVirtualShadowMapsMode", L"r.RayTracing.ForceAllRayTracingEffects", L"r.RayTracing.Shadows.Lights.Spot",
+};
+
+const wchar_t* const kWatchedHdr[] = {
+    L"r.AllowHDR",
+    L"r.HDR.EnableHDROutput",
+    L"r.HDR.Display.OutputDevice",
+    L"r.HDR.Display.ColorGamut",
+    L"r.HDR.Display.MaxLuminance",
+    L"r.HDR.Display.MinLuminanceLog10",
+    L"r.HDR.Display.MidLuminance",
+    L"r.HDR.Aces.SceneColorMultiplier",
+    L"r.HDR.UI.CompositeMode",
+    L"r.HDR.UI.Level",
+    L"r.HDR.UI.Luminance",
+    L"r.UCP.HDR",
+    L"r.UCP.SDR",
+    L"r.UCP.ExposureAdjust",
+    L"r.UCP.HDR.BMMinLuminanceOverride",
+    L"r.UCP.HDR.BMMaxLuminanceOverride",
+    L"r.UCP.HDRCalibrationMinLumAdjust",
+    L"r.UCP.DisplayGrade",
+    L"r.UCP.DisplayGrade.ShadowCutoff",
+    L"r.UCP.DisplayGrade.ShadowGamma",
+    L"r.HDRCalibrateScreen.Mode",
+    L"r.HDRCalibrateScreen.ShowGame",
+    L"r.HDRCalibrateScreen.SetLum.Min",
+    L"r.HDRCalibrateScreen.SetLum.Max",
+    L"r.TonemapperGamma",
 };
 
 // Width of a radio button or checkbox with this label.
@@ -655,6 +922,88 @@ void DrawOverride(Override& o) {
     ImGui::PopID();
 }
 
+// Peak, paper white and UI sliders; saved to ReShade.ini when a slider is let go.
+void DrawBrightness() {
+    if (g_timestamp != kKnownTimestamp) {
+        ImGui::TextDisabled("Not available: a different game build than the one analysed.");
+        return;
+    }
+    bool changed = ImGui::Checkbox("Override the game's HDR brightness", &g_bright.on);
+    ImGui::SetItemTooltip("Kept in ReShade.ini and applied every time the game starts.");
+    if (!g_bright.on) ImGui::BeginDisabled();
+    const ImGuiSliderFlags log = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
+    ImGui::SliderInt("Peak brightness", &g_bright.peak, 400, 10000, "%d nits", log);
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SetItemTooltip("The brightest the image gets: set it to your display's peak (e.g. from the Windows HDR "
+                          "Calibration app).\nThe game's own HDR max luminance slider has no effect with the Uniform "
+                          "Colour Pipeline off.");
+    ImGui::SliderInt("Paper white", &g_bright.paper, 80, 500, "%d nits", log);
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SetItemTooltip("Overall brightness of the scene: sets 18%% grey to 0.18 x this "
+                          "(r.HDR.Display.MidLuminance).\nDiffuse white lands near this value, a little lower where "
+                          "the curve rolls off. 203 nits is the HDR reference level.");
+    ImGui::SliderInt("UI brightness", &g_bright.ui, 80, 1000, "%d nits", log);
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SetItemTooltip("Brightness of menus and subtitles (r.HDR.UI.Luminance).");
+    if (!g_bright.on) ImGui::EndDisabled();
+    if (changed) SaveBrightness();
+
+    if (RendererValue(L"r.UCP.HDR", 0) != 0)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "r.UCP.HDR is 1: HDR runs through the Uniform Colour Pipeline (black scene), "
+                           "which ignores these.");
+    else if (RendererValue(L"r.HDR.EnableHDROutput", 0) == 0)
+        ImGui::TextDisabled("HDR is off in the game: these apply once it is on.");
+    else if (int built = 0; cvars::SafeCopy(&built, g_base + kSinkNitsRva, 4))
+        ImGui::TextDisabled("Tone curve built for %d nits", built);
+    if (uint8_t* settings = UserSettings()) {
+        uint8_t flag = 0;
+        int nits = 0;
+        cvars::SafeCopy(&flag, settings + kUseHdr, 1);
+        cvars::SafeCopy(&nits, settings + kHdrNits, 4);
+        ImGui::TextDisabled("Game user settings: bUseHDRDisplayOutput %u, HDRDisplayOutputNits %d", flag, nits);
+    }
+}
+
+// The switches of one group: label | controls | the renderer's value.
+void DrawSwitches(Group group) {
+    ImGui::PushID(static_cast<int>(group));
+    if (ImGui::BeginTable("##switches", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+        std::vector<std::string> labels;
+        for (const Override& o : g_overrides) labels.push_back(o.label);  // all groups: columns line up
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, WidestText(labels));
+        ImGui::TableSetupColumn("controls", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("renderer", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("renderer: -0.000000").x);
+        for (Override& o : g_overrides)
+            if (o.group == group) DrawOverride(o);
+        ImGui::EndTable();
+    }
+    ImGui::PopID();
+}
+
+// Read-only cvars: name | renderer value (priority).
+void DrawWatched(const char* id, const wchar_t* const* names, size_t count) {
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingFixedFit)) return;
+    std::vector<std::string> narrow;
+    for (size_t i = 0; i < count; ++i) narrow.push_back(Narrow(names[i]));
+    ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, WidestText(narrow));
+    ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
+    for (size_t i = 0; i < count; ++i) {
+        void* var = cvars::FindVariable(g_manager, names[i]);
+        Reading r = var ? Read(var) : Reading{};
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(narrow[i].c_str());
+        ImGui::TableNextColumn();
+        if (!var)
+            ImGui::TextDisabled("not a cvar");
+        else if (!r.ok)
+            ImGui::TextDisabled("unreadable");
+        else
+            ImGui::Text("%g  (priority 0x%02x)", r.render, r.priority);
+    }
+    ImGui::EndTable();
+}
+
 void DrawOverlay(effect_runtime*) {
     std::lock_guard lock(g_mutex);
     ImGui::TextUnformatted(UDRT_PRODUCT " " UDRT_VERSION " (phase 0 probe)");
@@ -665,39 +1014,23 @@ void DrawOverlay(effect_runtime*) {
     if (g_timestamp != kKnownTimestamp)
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "A different game build than the one analysed: see the log.");
 
-    ImGui::SeparatorText("Ray tracing switches");
-    if (ImGui::BeginTable("##switches", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
-        std::vector<std::string> labels;
-        for (const Override& o : g_overrides) labels.push_back(o.label);
-        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, WidestText(labels));
-        ImGui::TableSetupColumn("controls", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("renderer", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("renderer: -0.000000").x);
-        for (Override& o : g_overrides) DrawOverride(o);
-        ImGui::EndTable();
+    ImGui::SeparatorText("HDR brightness");
+    DrawBrightness();
+
+    ImGui::SeparatorText("HDR");
+    ImGui::Text("Swap chain: %s, %s", FormatName(g_backBufferFormat), ColorSpaceName(g_colorSpace));
+    DrawSwitches(Group::Hdr);
+    if (ImGui::TreeNode("HDR values (renderer's copy)")) {
+        DrawWatched("##watchedHdr", kWatchedHdr, std::size(kWatchedHdr));
+        ImGui::TreePop();
     }
+
+    ImGui::SeparatorText("Ray tracing switches");
+    DrawSwitches(Group::RayTracing);
     ImGui::TextDisabled("Session only: nothing is forced when the game starts.");
 
     ImGui::SeparatorText("Related values (renderer's copy)");
-    if (ImGui::BeginTable("##watched", 2, ImGuiTableFlags_SizingFixedFit)) {
-        std::vector<std::string> names;
-        for (const wchar_t* name : kWatched) names.push_back(Narrow(name));
-        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, WidestText(names));
-        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
-        for (const wchar_t* name : kWatched) {
-            void* var = cvars::FindVariable(g_manager, name);
-            Reading r = var ? Read(var) : Reading{};
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(Narrow(name).c_str());
-            ImGui::TableNextColumn();
-            if (!var)
-                ImGui::TextDisabled("not a cvar");
-            else if (!r.ok)
-                ImGui::TextDisabled("unreadable");
-            else
-                ImGui::Text("%g  (priority 0x%02x)", r.render, r.priority);
-        }
-        ImGui::EndTable();
-    }
+    DrawWatched("##watched", kWatched, std::size(kWatched));
 
     ImGui::SeparatorText("Ray tracing work (last frame)");
     {

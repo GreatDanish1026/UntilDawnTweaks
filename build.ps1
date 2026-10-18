@@ -13,6 +13,8 @@ $addon = "$root\bin\$name.addon64"
 $exe = "Bates-Win64-Shipping.exe"
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+# vcvars64.bat runs vswhere by name.
+$env:PATH = "$(Split-Path $vswhere);$env:PATH"
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) { throw "Visual Studio with the C++ x64 tools not found." }
 $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
