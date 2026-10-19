@@ -269,3 +269,27 @@ holds audio, configs and `AssetRegistry.bin`, not textures.
 - Headroom, live values: `r.Streaming.PoolSize` 950 MB (`LimitPoolSizeToVRAM` 0),
   `r.MaxAnisotropy` 8, `r.Shadow.Virtual.ResolutionLodBias{Directional,Local}` 0. The Detail
   settings raise these to 3072 MB, 16 and -1; confirmed in game to help at an acceptable cost.
+
+## Cinematic tier and the rest of 1.1.0
+
+`DefaultScalability.ini` has an "@Cine" level for every group, above the "@3" the menu offers
+(values: `ShadowQuality@Cine` sun VSM bias -1.5 also while moving, `MaxPhysicalPages` 8192,
+SMRT 16 rays x 8 samples vs 8 x 4; `ViewDistanceQuality@Cine` `r.ViewDistanceScale` 2,
+`r.StaticMeshLODDistanceScale` 0.7; `FoliageQuality@Cine` `foliage.MinimumScreenSize` 0.0001;
+`PostProcessQuality@Cine` `r.DepthOfFieldQuality` 4; `ReflectionQuality@Cine` `r.SSR.Quality`
+4). Volumetric fog sits in `GlobalIlluminationQuality`: 8 px x 128 slices at both @3 and @Cine.
+
+- The game also sets `r.VolumetricFog.UseGridMultiplier` / `GridMultiplier` ("fog multiplier
+  for dynamically adjusting volumetric fog quality") every frame at 0x0a in
+  `UWorld::AddPostProcessingSettings`, from post-process volumes. Not changed; whether it
+  scales the grid finer or coarser wasn't worked out.
+- `SetDepthOfFieldQualities` sets the game's own DOF kernel and gather cvars; raising
+  `r.DepthOfFieldQuality` to 4 on top looked fine in game.
+- Film grain, motion blur strength and chromatic aberration are `UBatesGameUserSettings`
+  menu options (`SetFilmGrain`, `SetMotionBlurStrength`, `SetChromaticAbberation`), so the
+  add-on leaves them to the menu.
+- The streaming pool follows the card's dedicated memory (DXGI `DedicatedVideoMemory` of the
+  D3D12 device's adapter, via `EnumAdapterByLuid`): 1024 / 2048 / 2560 / 3072 / 4096 / 6144 MB
+  for 6 or less / 8 / 10 / 12 / 16 / 20+ GB.
+- Confirmed in game (RTX 5080, 4K): Sharp and Cinematic shadows, High and Ultra fog,
+  Cinematic view distance and the Cinematic effects all look right at an acceptable cost.

@@ -23,6 +23,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d12.h>
+#include <dxgi1_4.h>
 
 #define ImTextureID ImU64
 #include <imgui.h>
@@ -596,13 +597,51 @@ void DefineOverrides() {
         {Group::Detail, L"r.MaxAnisotropy", "Anisotropic filtering",
          "Texture filtering at shallow angles (floors, walls). The game uses 8.",
          {{4, "4x"}, {8, "8x"}, {16, "16x"}}},
+        // Sliders, not choices: Cinematic uses -1.5, which a choice would round.
         {Group::Detail, L"r.Shadow.Virtual.ResolutionLodBiasDirectional", "Sun shadow resolution bias",
-         "Virtual shadow map resolution for the sun and moon. Lower is sharper and costs more. The game uses 0.",
-         {{0, "0"}, {-1, "-1"}, {-2, "-2"}}},
+         "Virtual shadow map resolution for the sun and moon. Lower is sharper and costs more. The game uses 0 "
+         "(its Cinematic tier -1.5).",
+         {}, -2.0f, 2.0f},
+        {Group::Detail, L"r.Shadow.Virtual.ResolutionLodBiasDirectionalMoving", "Sun shadow bias, moving",
+         "The same while the light or camera moves. The game uses 0 (its Cinematic tier -1.5).", {}, -2.0f, 2.0f},
         {Group::Detail, L"r.Shadow.Virtual.ResolutionLodBiasLocal", "Local shadow resolution bias",
          "Virtual shadow map resolution for lamps and flashlights. Lower is sharper and costs more. The game "
          "uses 0.",
-         {{0, "0"}, {-1, "-1"}, {-2, "-2"}}},
+         {}, -2.0f, 2.0f},
+        {Group::Detail, L"r.Shadow.Virtual.MaxPhysicalPages", "Shadow map pages",
+         "Memory pages for virtual shadow maps. Sharper shadows need more; when they run out, shadows blur or "
+         "flicker in patches. The game uses 4096 (its Cinematic tier 8192).",
+         {{4096, "4096"}, {8192, "8192"}}},
+        {Group::Detail, L"r.Shadow.Virtual.SMRT.RayCountDirectional", "Sun soft shadow rays",
+         "Rays for soft sun shadows (smoother penumbrae). The game uses 8 (Cinematic 16).", {{8, "8"}, {16, "16"}}},
+        {Group::Detail, L"r.Shadow.Virtual.SMRT.SamplesPerRayDirectional", "Sun soft shadow samples",
+         "Samples per soft shadow ray for the sun. The game uses 4 (Cinematic 8).", {{4, "4"}, {8, "8"}}},
+        {Group::Detail, L"r.Shadow.Virtual.SMRT.RayCountLocal", "Local soft shadow rays",
+         "Rays for soft shadows of lamps and flashlights. The game uses 8 (Cinematic 16).", {{8, "8"}, {16, "16"}}},
+        {Group::Detail, L"r.Shadow.Virtual.SMRT.SamplesPerRayLocal", "Local soft shadow samples",
+         "Samples per soft shadow ray for lamps and flashlights. The game uses 4 (Cinematic 8).",
+         {{4, "4"}, {8, "8"}}},
+        {Group::Detail, L"r.VolumetricFog.GridPixelSize", "Fog grid cell size",
+         "Screen pixels per volumetric fog cell. Smaller is finer: smoother fog and light shafts, at more cost. "
+         "The game uses 8.",
+         {{4, "4"}, {6, "6"}, {8, "8"}}},
+        {Group::Detail, L"r.VolumetricFog.GridSizeZ", "Fog grid depth slices",
+         "Volumetric fog cells in depth. More is finer. The game uses 128.", {{128, "128"}, {192, "192"}, {256, "256"}}},
+        {Group::Detail, L"r.ViewDistanceScale", "View distance scale",
+         "How far objects stay drawn. The game uses 1 (its Cinematic tier 2).", {}, 0.5f, 3.0f},
+        {Group::Detail, L"r.StaticMeshLODDistanceScale", "Mesh LOD distance scale",
+         "Lower keeps detailed meshes further away (less pop-in). The game uses 1 (Cinematic 0.7).", {}, 0.3f, 1.5f},
+        {Group::Detail, L"foliage.MinimumScreenSize", "Foliage minimum screen size",
+         "Foliage smaller than this on screen is culled. The game uses 0.001 (Cinematic 0.0001).",
+         {}, 0.0f, 0.002f},
+        {Group::Detail, L"r.DepthOfFieldQuality", "Depth of field quality",
+         "The game uses 2 (its Cinematic tier 4). The game also tunes its own DOF settings.",
+         {{2, "2"}, {3, "3"}, {4, "4"}}},
+        {Group::Detail, L"r.SSR.Quality", "Screen space reflections",
+         "Quality of the non-ray-traced reflections. The game uses 3 (Cinematic 4).", {{3, "3"}, {4, "4"}}},
+        {Group::Detail, L"r.TranslucencyLightingVolumeDim", "Translucency lighting volume",
+         "Resolution of the lighting volume for particles, smoke, glass and hair. The game uses 64.",
+         {{64, "64"}, {128, "128"}}},
         {Group::RayTracing, L"r.Shadow.Virtual.Enable", "Virtual shadow maps",
          "UE's virtual shadow maps (the game holds them on from code). Turning them off tests whether they hide "
          "ray traced shadows.",
@@ -978,50 +1017,125 @@ void ApplyRt() {
 // ---------------------------------------------------------------- detail settings
 
 // Headroom the game leaves (its scalability presets, read live): a 950 MB texture streaming
-// pool, which at 4K makes textures stream at lower resolution; 8x anisotropic filtering; and
-// virtual shadow maps at resolution bias 0. Skin (SSS) is already at its maximum on the top
-// shading preset, and sharpening is the game's own Image Sharpening slider, so neither is here.
+// pool, which at 4K makes textures stream at lower resolution; 8x anisotropic filtering;
+// virtual shadow maps at resolution bias 0 with 4096 pages; an 8 px x 128 volumetric fog grid;
+// and view distance, depth of field, SSR and translucency below the game's own Cinematic tier
+// (DefaultScalability.ini "@Cine", which the menu doesn't offer). Skin (SSS) is already at its
+// maximum on the top shading preset; sharpening, film grain, motion blur and chromatic
+// aberration are the game's own menu options; so none of those is here.
 
-enum DetailShadows : int { kShadowsGameRes = 0, kShadowsSharp = 1 };
+enum DetailShadows : int { kShadowsGameRes = 0, kShadowsSharp = 1, kShadowsCinematic = 2 };
+enum DetailFog : int { kFogGame = 0, kFogHigh = 1, kFogUltra = 2 };
+enum DetailViewDistance : int { kViewGame = 0, kViewCinematic = 1 };
+
+// The streaming pool follows the card's memory, about a quarter of it: ray tracing at 4K and
+// the game's other buffers need the rest.
+struct VramChoice {
+    const char* label;
+    int gb;      // the smallest card this row is for
+    int poolMb;  // r.Streaming.PoolSize
+};
+const VramChoice kVram[] = {
+    {"6 GB or less", 0, 1024}, {"8 GB", 8, 2048},   {"10 GB", 10, 2560},
+    {"12 GB", 12, 3072},       {"16 GB", 16, 4096}, {"20 GB or more", 20, 6144},
+};
+constexpr int kVramAuto = 0;      // saved choice: 0 Auto, else 1 + a kVram row
+constexpr int kVramFallback = 1;  // 8 GB, if the card's memory can't be read
+
+uint64_t g_vramMb = 0;  // dedicated memory of the game's adapter, from DXGI (0: unknown)
+
+// The kVram row for the detected memory (the largest row it reaches).
+int DetectedVramRow() {
+    if (!g_vramMb) return kVramFallback;
+    int gb = static_cast<int>((g_vramMb + 512) / 1024);  // a "16 GB" card reports a little under
+    int row = 0;
+    for (int i = 0; i < static_cast<int>(std::size(kVram)); ++i)
+        if (gb >= kVram[i].gb) row = i;
+    return row;
+}
 
 struct DetailSettings {
     bool on = true;  // with nothing saved: on, at these defaults
-    int poolMb = 3072;
+    int vram = kVramAuto;
     bool aniso16 = true;
     int shadows = kShadowsSharp;
+    int fog = kFogHigh;
+    int viewDistance = kViewCinematic;
+    bool cinematicEffects = true;
     bool initialised = false;
 };
 DetailSettings g_detail;
 
+int VramRow() { return g_detail.vram == kVramAuto ? DetectedVramRow() : g_detail.vram - 1; }
+
 void SaveDetail() {
     reshade::set_config_value(nullptr, kConfigSection, "DetailOverride", g_detail.on);
-    reshade::set_config_value(nullptr, kConfigSection, "DetailStreamingPoolMb", g_detail.poolMb);
+    reshade::set_config_value(nullptr, kConfigSection, "DetailVideoMemory", g_detail.vram);
     reshade::set_config_value(nullptr, kConfigSection, "DetailAnisotropy16", g_detail.aniso16);
     reshade::set_config_value(nullptr, kConfigSection, "DetailShadows", g_detail.shadows);
+    reshade::set_config_value(nullptr, kConfigSection, "DetailFog", g_detail.fog);
+    reshade::set_config_value(nullptr, kConfigSection, "DetailViewDistance", g_detail.viewDistance);
+    reshade::set_config_value(nullptr, kConfigSection, "DetailCinematicEffects", g_detail.cinematicEffects);
 }
 
 void InitDetail() {
     g_detail.initialised = true;
     bool saved = reshade::get_config_value(nullptr, kConfigSection, "DetailOverride", g_detail.on);
     if (saved) {
-        reshade::get_config_value(nullptr, kConfigSection, "DetailStreamingPoolMb", g_detail.poolMb);
+        reshade::get_config_value(nullptr, kConfigSection, "DetailVideoMemory", g_detail.vram);
         reshade::get_config_value(nullptr, kConfigSection, "DetailAnisotropy16", g_detail.aniso16);
         reshade::get_config_value(nullptr, kConfigSection, "DetailShadows", g_detail.shadows);
+        // Absent in the first 1.1 builds: keep the defaults.
+        reshade::get_config_value(nullptr, kConfigSection, "DetailFog", g_detail.fog);
+        reshade::get_config_value(nullptr, kConfigSection, "DetailViewDistance", g_detail.viewDistance);
+        reshade::get_config_value(nullptr, kConfigSection, "DetailCinematicEffects", g_detail.cinematicEffects);
     }
-    g_detail.poolMb = std::clamp(g_detail.poolMb, 512, 8192);
-    Log("detail: %s, override %s: streaming pool %d MB, anisotropy %s, shadows %s",
-        saved ? "from ReShade.ini" : "defaults", g_detail.on ? "on" : "off", g_detail.poolMb,
-        g_detail.aniso16 ? "16x" : "game", g_detail.shadows == kShadowsSharp ? "sharp" : "game");
+    g_detail.vram = std::clamp(g_detail.vram, 0, static_cast<int>(std::size(kVram)));
+    g_detail.shadows = std::clamp(g_detail.shadows, static_cast<int>(kShadowsGameRes), static_cast<int>(kShadowsCinematic));
+    g_detail.fog = std::clamp(g_detail.fog, static_cast<int>(kFogGame), static_cast<int>(kFogUltra));
+    g_detail.viewDistance = std::clamp(g_detail.viewDistance, static_cast<int>(kViewGame), static_cast<int>(kViewCinematic));
+    Log("detail: %s, override %s: video memory %s (detected %llu MB) -> streaming pool %d MB, anisotropy %s, "
+        "shadows %d, fog %d, view distance %d, cinematic effects %s",
+        saved ? "from ReShade.ini" : "defaults", g_detail.on ? "on" : "off",
+        g_detail.vram == kVramAuto ? "auto" : kVram[g_detail.vram - 1].label,
+        static_cast<unsigned long long>(g_vramMb), kVram[VramRow()].poolMb, g_detail.aniso16 ? "16x" : "game",
+        g_detail.shadows, g_detail.fog, g_detail.viewDistance, g_detail.cinematicEffects ? "on" : "off");
 }
 
 // Every frame, before ApplyOverrides.
 void ApplyDetail() {
     if (!g_detail.initialised) InitDetail();
-    Drive(L"r.Streaming.PoolSize", g_detail.on, static_cast<float>(g_detail.poolMb));
+    Drive(L"r.Streaming.PoolSize", g_detail.on, static_cast<float>(kVram[VramRow()].poolMb));
     Drive(L"r.MaxAnisotropy", g_detail.on && g_detail.aniso16, 16.0f);
-    bool sharp = g_detail.on && g_detail.shadows == kShadowsSharp;
-    Drive(L"r.Shadow.Virtual.ResolutionLodBiasDirectional", sharp, -1.0f);
-    Drive(L"r.Shadow.Virtual.ResolutionLodBiasLocal", sharp, -1.0f);
+
+    // Sharp: one resolution step up, with the Cinematic tier's page pool so the extra pages
+    // don't run out. Cinematic: the game's own Cinematic tier for the sun, plus its soft
+    // shadow ray counts.
+    bool shadows = g_detail.on && g_detail.shadows != kShadowsGameRes;
+    bool cine = g_detail.on && g_detail.shadows == kShadowsCinematic;
+    Drive(L"r.Shadow.Virtual.ResolutionLodBiasDirectional", shadows, cine ? -1.5f : -1.0f);
+    Drive(L"r.Shadow.Virtual.ResolutionLodBiasDirectionalMoving", cine, -1.5f);
+    Drive(L"r.Shadow.Virtual.ResolutionLodBiasLocal", shadows, -1.0f);
+    Drive(L"r.Shadow.Virtual.MaxPhysicalPages", shadows, 8192.0f);
+    Drive(L"r.Shadow.Virtual.SMRT.RayCountDirectional", cine, 16.0f);
+    Drive(L"r.Shadow.Virtual.SMRT.SamplesPerRayDirectional", cine, 8.0f);
+    Drive(L"r.Shadow.Virtual.SMRT.RayCountLocal", cine, 16.0f);
+    Drive(L"r.Shadow.Virtual.SMRT.SamplesPerRayLocal", cine, 8.0f);
+
+    bool fog = g_detail.on && g_detail.fog != kFogGame;
+    bool ultra = g_detail.fog == kFogUltra;
+    Drive(L"r.VolumetricFog.GridPixelSize", fog, ultra ? 4.0f : 6.0f);
+    Drive(L"r.VolumetricFog.GridSizeZ", fog && ultra, 192.0f);
+
+    bool view = g_detail.on && g_detail.viewDistance == kViewCinematic;
+    Drive(L"r.ViewDistanceScale", view, 2.0f);
+    Drive(L"r.StaticMeshLODDistanceScale", view, 0.7f);
+    Drive(L"foliage.MinimumScreenSize", view, 0.0001f);
+
+    bool effects = g_detail.on && g_detail.cinematicEffects;
+    Drive(L"r.DepthOfFieldQuality", effects, 4.0f);
+    Drive(L"r.SSR.Quality", effects, 4.0f);
+    Drive(L"r.TranslucencyLightingVolumeDim", effects, 128.0f);
 }
 
 // ---------------------------------------------------------------- events
@@ -1030,9 +1144,37 @@ constexpr uint64_t kCensusFrame = 600;  // ~10 s in: plugins have registered the
 uint64_t g_frames = 0;
 bool g_snapshotRequested = false;
 
+// Dedicated memory of the adapter a D3D12 device runs on, in MB (0 if unknown). DXGI is
+// loaded at run time: in the game's folder "dxgi.dll" is ReShade, which forwards it.
+uint64_t AdapterMemoryMb(ID3D12Device* d3d) {
+    using CreateFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+    HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
+    auto create = dxgi ? reinterpret_cast<CreateFactoryFn>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+    if (!create) return 0;
+    uint64_t mb = 0;
+    IDXGIFactory4* factory = nullptr;
+    if (SUCCEEDED(create(IID_PPV_ARGS(&factory)))) {
+        IDXGIAdapter1* adapter = nullptr;
+        if (SUCCEEDED(factory->EnumAdapterByLuid(d3d->GetAdapterLuid(), IID_PPV_ARGS(&adapter)))) {
+            DXGI_ADAPTER_DESC1 desc = {};
+            if (SUCCEEDED(adapter->GetDesc1(&desc))) mb = desc.DedicatedVideoMemory >> 20;
+            adapter->Release();
+        }
+        factory->Release();
+    }
+    return mb;
+}
+
 void OnInitDevice(device* dev) {
     std::lock_guard lock(g_mutex);
-    Log("device created: %s", dev->get_api() == device_api::d3d12 ? "Direct3D 12" : "not Direct3D 12");
+    bool d3d12 = dev->get_api() == device_api::d3d12;
+    Log("device created: %s", d3d12 ? "Direct3D 12" : "not Direct3D 12");
+    if (!d3d12) return;
+    // The game creates a few devices at startup; the last one is the one it renders with.
+    if (uint64_t mb = AdapterMemoryMb(reinterpret_cast<ID3D12Device*>(dev->get_native()))) {
+        g_vramMb = mb;
+        Log("device: %llu MB dedicated video memory", static_cast<unsigned long long>(mb));
+    }
 }
 
 // The swap chain's back buffer format and colour space, logged when they change.
@@ -1186,6 +1328,8 @@ float WidestText(const std::vector<std::string>& texts) {
     return w;
 }
 
+void Help(const char* text);
+
 // One row of the switches table: label | controls | the renderer's value.
 void DrawOverride(Override& o) {
     ImGui::PushID(o.cvar);
@@ -1193,7 +1337,7 @@ void DrawOverride(Override& o) {
     ImGui::TableNextColumn();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(o.label);
-    ImGui::SetItemTooltip("%s\n\n%s", Narrow(o.cvar).c_str(), o.help);
+    Help((Narrow(o.cvar) + "\n\n" + o.help).c_str());
     ImGui::TableNextColumn();
     if (o.missing) {
         ImGui::TextDisabled("not in this build");
@@ -1223,7 +1367,7 @@ void DrawOverride(Override& o) {
         if (!o.wanted) ImGui::BeginDisabled();
         float v = o.wanted ? o.value : static_cast<float>(game);
         ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x, ImGui::GetFontSize() * 6));
-        if (ImGui::SliderFloat("##v", &v, o.min, o.max, o.wanted ? "%.2f" : "game: %.2f")) o.value = v;
+        if (ImGui::SliderFloat("##v", &v, o.min, o.max, o.wanted ? "%.4g" : "game: %.4g")) o.value = v;
         if (!o.wanted) ImGui::EndDisabled();
     } else {
         if (ImGui::RadioButton(gameLabel, !o.wanted)) o.wanted = false;
@@ -1241,60 +1385,197 @@ void DrawOverride(Override& o) {
     ImGui::PopID();
 }
 
+// ---------------------------------------------------------------- settings layout
+
+const ImVec4 kWarn(1.0f, 0.75f, 0.3f, 1.0f);
+
+// A tooltip for the last item, wrapped to a readable width.
+void Help(const char* text) {
+    if (!text || !*text || !ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) return;
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
+// Settings as a two-column table, so names and controls line up: name | control. The name
+// column fits the widest name given; the control column has a fixed width.
+bool BeginSettings(const char* id, const char* widestName) {
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingFixedFit)) return false;
+    ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed,
+                            ImGui::CalcTextSize(widestName).x + ImGui::GetFontSize());
+    ImGui::TableSetupColumn("control", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 15);
+    return true;
+}
+
+// One row: the name (hover for help), then the control cell, sized for the caller's widget.
+// Call Help(help) after the widget too, so hovering the control explains it as well.
+void SettingRow(const char* name, const char* help) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(name);
+    Help(help);
+    ImGui::TableNextColumn();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+}
+
+// The tab's master checkbox, with a line saying what it is.
+bool MasterCheckbox(const char* label, bool* on, const char* help) {
+    bool changed = ImGui::Checkbox(label, on);
+    Help(help);
+    return changed;
+}
+
+// Right-aligned "Reset to defaults" at the end of a tab.
+bool ResetButton() {
+    ImGui::Spacing();
+    const char* label = "Reset to defaults";
+    float w = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - w));
+    return ImGui::Button(label);
+}
+
 // Saved detail settings.
 void DrawDetail() {
-    bool changed = ImGui::Checkbox("Improve texture and shadow detail", &g_detail.on);
-    ImGui::SetItemTooltip("Kept in ReShade.ini and applied every time the game starts.");
+    bool changed = MasterCheckbox("Improve detail, shadows and fog", &g_detail.on,
+                                  "Kept in ReShade.ini and applied every time the game starts.");
+    ImGui::Spacing();
     if (!g_detail.on) ImGui::BeginDisabled();
-    ImGui::SliderInt("Texture streaming pool", &g_detail.poolMb, 512, 8192, "%d MB", ImGuiSliderFlags_AlwaysClamp);
-    changed |= ImGui::IsItemDeactivatedAfterEdit();
-    ImGui::SetItemTooltip("Video memory for streamed textures. The game uses 950 MB, which at 4K makes textures "
-                          "stream at lower resolution. Keep it well under your card's memory: about 2048 MB on an "
-                          "8 GB card, 3072-4096 MB on 12 GB or more.");
-    changed |= ImGui::Checkbox("16x anisotropic filtering", &g_detail.aniso16);
-    ImGui::SetItemTooltip("Sharper floors and walls at shallow angles (the game uses 8x). Nearly free.");
-    const char* shadows[] = {"Game", "Sharp"};
-    changed |= ImGui::Combo("Shadow sharpness", &g_detail.shadows, shadows, 2);
-    ImGui::SetItemTooltip("Sharp: virtual shadow maps one resolution step higher for the sun, moon, lamps and "
-                          "flashlights. Costs some performance.");
+    if (BeginSettings("##detail", "Cinematic effects")) {
+        char autoLabel[64];
+        if (g_vramMb)
+            snprintf(autoLabel, sizeof(autoLabel), "Auto (%s)", kVram[DetectedVramRow()].label);
+        else
+            snprintf(autoLabel, sizeof(autoLabel), "Auto (not detected: %s)", kVram[kVramFallback].label);
+        const char* vram[1 + std::size(kVram)] = {autoLabel};
+        for (size_t i = 0; i < std::size(kVram); ++i) vram[1 + i] = kVram[i].label;
+        char vramHelp[256];
+        snprintf(vramHelp, sizeof(vramHelp),
+                 "Your graphics card's memory. Textures get about a quarter of it (now %d MB; the game uses 950 MB, "
+                 "which at 4K makes them stream at lower resolution). Auto reads it from the card.",
+                 kVram[VramRow()].poolMb);
+        SettingRow("Video card memory", vramHelp);
+        changed |= ImGui::Combo("##vram", &g_detail.vram, vram, static_cast<int>(std::size(vram)));
+        Help(vramHelp);
+
+        const char* afHelp = "16x: sharper floors and walls at shallow angles (the game uses 8x). Nearly free.";
+        SettingRow("Texture filtering", afHelp);
+        int af = g_detail.aniso16 ? 1 : 0;
+        const char* afs[] = {"Game (8x)", "16x"};
+        if (ImGui::Combo("##af", &af, afs, 2)) {
+            g_detail.aniso16 = af == 1;
+            changed = true;
+        }
+        Help(afHelp);
+
+        const char* shadowHelp = "Sharp: shadows of the sun, moon, lamps and flashlights one step sharper, with "
+                                 "more shadow memory so they don't blur in patches.\nCinematic: the game's own "
+                                 "Cinematic shadows, sharper still with smoother soft edges. Costs the most.";
+        SettingRow("Shadows", shadowHelp);
+        const char* shadows[] = {"Game", "Sharp", "Cinematic"};
+        changed |= ImGui::Combo("##shadows", &g_detail.shadows, shadows, 3);
+        Help(shadowHelp);
+
+        const char* fogHelp = "Detail of the volumetric fog and the light shafts through it (flashlights, lamps).\n"
+                              "High: finer fog (6 px cells; the game uses 8).\nUltra: finest (4 px cells, more depth "
+                              "slices), about 4x the game's fog work.";
+        SettingRow("Fog", fogHelp);
+        const char* fog[] = {"Game", "High", "Ultra"};
+        changed |= ImGui::Combo("##fog", &g_detail.fog, fog, 3);
+        Help(fogHelp);
+
+        const char* viewHelp = "Cinematic: the game's own Cinematic view distance. Objects and foliage are drawn "
+                               "further away and detailed meshes kept longer, so there is less pop-in.";
+        SettingRow("View distance", viewHelp);
+        const char* view[] = {"Game", "Cinematic"};
+        changed |= ImGui::Combo("##view", &g_detail.viewDistance, view, 2);
+        Help(viewHelp);
+
+        const char* fxHelp = "The game's own Cinematic quality for depth of field (cutscenes), screen space "
+                             "reflections, and lighting on particles, smoke, glass and hair.";
+        SettingRow("Cinematic effects", fxHelp);
+        changed |= ImGui::Checkbox("##fx", &g_detail.cinematicEffects);
+        Help(fxHelp);
+        ImGui::EndTable();
+    }
     if (!g_detail.on) ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("Film grain, motion blur, chromatic aberration and sharpening are in the game's own "
+                        "graphics menu.");
+    ImGui::PopTextWrapPos();
+    if (ResetButton()) {
+        g_detail = DetailSettings{};
+        g_detail.initialised = true;
+        changed = true;
+    }
     if (changed) SaveDetail();
 }
 
 // Saved ray tracing settings.
 void DrawRt() {
-    bool changed = ImGui::Checkbox("Improve the game's ray tracing", &g_rt.on);
-    ImGui::SetItemTooltip("Kept in ReShade.ini and applied every time the game starts. The game's Ray Tracing menu "
-                          "option must be on.");
+    bool changed = MasterCheckbox("Improve the game's ray tracing", &g_rt.on,
+                                  "Kept in ReShade.ini and applied every time the game starts.");
+    if (RendererValue(L"r.RayTracing.ForceAllRayTracingEffects", -1) == 0) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(kWarn, "Ray Tracing is off in the game's graphics menu, so every RT effect is off. "
+                                  "Turn it on there.");
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::Spacing();
     if (!g_rt.on) ImGui::BeginDisabled();
-    const char* shadows[] = {"Game (most lights opt out)", "Lights marked enhanced", "All lights"};
-    changed |= ImGui::Combo("RT shadows", &g_rt.shadows, shadows, 3);
-    ImGui::SetItemTooltip("r.RayTracing.Enable.BMEnhancedMode. All lights is the most visible and the most costly.");
-    const char* reflections[] = {"Game (marked areas, mirrors only)", "Everywhere"};
-    int r = g_rt.reflectionsEverywhere ? 1 : 0;
-    if (ImGui::Combo("RT reflections", &r, reflections, 2)) {
-        g_rt.reflectionsEverywhere = r == 1;
+    if (BeginSettings("##rt", "Reflection roughness")) {
+        const char* shadowHelp = "Which lights cast ray traced shadows. As shipped, most lights opt out. All lights "
+                                 "is the most visible change and the most costly.";
+        SettingRow("Shadows", shadowHelp);
+        const char* shadows[] = {"Game (few lights)", "Enhanced lights", "All lights"};
+        changed |= ImGui::Combo("##shadows", &g_rt.shadows, shadows, 3);
+        Help(shadowHelp);
+
+        const char* reflHelp = "Where ray traced reflections appear. As shipped, only in a few marked areas and on "
+                               "mirror-like surfaces. Follows the game's RT Reflections menu option.";
+        SettingRow("Reflections", reflHelp);
+        const char* reflections[] = {"Game (marked areas)", "Everywhere"};
+        int r = g_rt.reflectionsEverywhere ? 1 : 0;
+        if (ImGui::Combo("##reflections", &r, reflections, 2)) {
+            g_rt.reflectionsEverywhere = r == 1;
+            changed = true;
+        }
+        Help(reflHelp);
+
+        const char* roughHelp = "How rough a surface can be and still get ray traced reflections; rougher ones keep "
+                                "screen space reflections. The game uses 0.01 (mirrors only). Higher costs more and "
+                                "can look noisier.";
+        SettingRow("Reflection roughness", roughHelp);
+        if (!g_rt.reflectionsEverywhere) ImGui::BeginDisabled();
+        ImGui::SliderFloat("##roughness", &g_rt.maxRoughness, 0.01f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        Help(roughHelp);
+        if (!g_rt.reflectionsEverywhere) ImGui::EndDisabled();
+
+        const char* qualityHelp = "Less noise in RT shadows, reflections and ambient occlusion. High and Ultra trace "
+                                  "2 and 4 rays per pixel (the cost of those effects goes up about as much) and "
+                                  "smooth harder.";
+        SettingRow("Quality", qualityHelp);
+        const char* qualities[] = {"Game (1 ray)", "High (2 rays)", "Ultra (4 rays)"};
+        changed |= ImGui::Combo("##quality", &g_rt.quality, qualities, 3);
+        Help(qualityHelp);
+        ImGui::EndTable();
+    }
+    if (!g_rt.on) ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("Needs the game's own Ray Tracing option on. RT ambient occlusion and RT reflections also "
+                        "follow their own options in the game's menu.");
+    ImGui::PopTextWrapPos();
+    if (ResetButton()) {
+        g_rt = RtSettings{};
+        g_rt.initialised = true;
         changed = true;
     }
-    ImGui::SetItemTooltip("Everywhere: r.RayTracing.Reflections on outside the game's marked areas too. Follows the "
-                          "game's RT reflections menu option.");
-    if (!g_rt.reflectionsEverywhere) ImGui::BeginDisabled();
-    ImGui::SliderFloat("Reflections max roughness", &g_rt.maxRoughness, 0.01f, 1.0f, "%.2f",
-                       ImGuiSliderFlags_AlwaysClamp);
-    changed |= ImGui::IsItemDeactivatedAfterEdit();
-    ImGui::SetItemTooltip("Surfaces rougher than this keep screen space and probe reflections. The game ships 0.01 "
-                          "(mirrors only); higher costs more and can look noisier.");
-    if (!g_rt.reflectionsEverywhere) ImGui::EndDisabled();
-    const char* qualities[] = {"Game (1 ray per pixel)", "High (2 rays per pixel)", "Ultra (4 rays per pixel)"};
-    changed |= ImGui::Combo("RT quality", &g_rt.quality, qualities, 3);
-    ImGui::SetItemTooltip("Less noise in RT shadows, reflections and AO. High and Ultra trace 2 and 4 rays per pixel "
-                          "(the cost of those effects goes up about as much) and let the shadow and reflection "
-                          "denoisers smooth harder.");
-    if (!g_rt.on) ImGui::EndDisabled();
     if (changed) SaveRt();
-    if (RendererValue(L"r.RayTracing.ForceAllRayTracingEffects", -1) == 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-                           "Ray tracing is off in the game's graphics menu: every RT effect is off.");
 }
 
 // Peak, paper white and UI sliders; saved to ReShade.ini when a slider is let go.
@@ -1303,34 +1584,43 @@ void DrawBrightness() {
         ImGui::TextDisabled("Not available: a different game build than the one analysed.");
         return;
     }
-    bool changed = ImGui::Checkbox("Override the game's HDR brightness", &g_bright.on);
-    ImGui::SetItemTooltip("Kept in ReShade.ini and applied every time the game starts.");
-    if (!g_bright.on) ImGui::BeginDisabled();
-    const ImGuiSliderFlags log = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
-    ImGui::SliderInt("Peak brightness", &g_bright.peak, 400, 10000, "%d nits", log);
-    changed |= ImGui::IsItemDeactivatedAfterEdit();
-    ImGui::SetItemTooltip("The brightest the image gets: set it to your display's peak (e.g. from the Windows HDR "
-                          "Calibration app).\nThe game's own HDR max luminance slider has no effect with the Uniform "
-                          "Colour Pipeline off.");
-    ImGui::SliderInt("Paper white", &g_bright.paper, 80, 500, "%d nits", log);
-    changed |= ImGui::IsItemDeactivatedAfterEdit();
-    ImGui::SetItemTooltip("Overall brightness of the scene: sets 18%% grey to 0.18 x this "
-                          "(r.HDR.Display.MidLuminance).\nDiffuse white lands near this value, a little lower where "
-                          "the curve rolls off. 203 nits is the HDR reference level.");
-    ImGui::SliderInt("UI brightness", &g_bright.ui, 80, 1000, "%d nits", log);
-    changed |= ImGui::IsItemDeactivatedAfterEdit();
-    ImGui::SetItemTooltip("Brightness of menus and subtitles (r.HDR.UI.Luminance).");
-    if (!g_bright.on) ImGui::EndDisabled();
-    if (changed) SaveBrightness();
-
+    bool changed = MasterCheckbox("Override the game's HDR brightness", &g_bright.on,
+                                  "Kept in ReShade.ini and applied every time the game starts. The game's own HDR "
+                                  "sliders do nothing once its HDR is fixed (r.UCP.HDR=0).");
+    ImGui::PushTextWrapPos(0.0f);
     if (RendererValue(L"r.UCP.HDR", 0) != 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-                           "r.UCP.HDR is 1: HDR runs through the Uniform Colour Pipeline (black scene), "
-                           "which ignores these.");
+        ImGui::TextColored(kWarn, "The HDR fix isn't applied: add r.UCP.HDR=0 to Engine.ini (see the README). "
+                                  "Until then HDR shows a black screen and these do nothing.");
     else if (RendererValue(L"r.HDR.EnableHDROutput", 0) == 0)
         ImGui::TextDisabled("HDR is off in the game: these apply once it is on.");
-    else if (int built = 0; cvars::SafeCopy(&built, g_base + kSinkNitsRva, 4))
-        ImGui::TextDisabled("Tone curve built for %d nits", built);
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    if (!g_bright.on) ImGui::BeginDisabled();
+    if (BeginSettings("##hdr", "Peak brightness")) {
+        const ImGuiSliderFlags log = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
+        const char* peakHelp = "The brightest the image gets: set it to your display's peak (for example from the "
+                               "Windows HDR Calibration app). The game otherwise uses 1000 nits.";
+        SettingRow("Peak brightness", peakHelp);
+        ImGui::SliderInt("##peak", &g_bright.peak, 400, 10000, "%d nits", log);
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        Help(peakHelp);
+
+        const char* paperHelp = "Overall brightness of the scene. 203 nits is the HDR reference level; raise it in "
+                                "a bright room.";
+        SettingRow("Paper white", paperHelp);
+        ImGui::SliderInt("##paper", &g_bright.paper, 80, 500, "%d nits", log);
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        Help(paperHelp);
+
+        const char* uiHelp = "Brightness of menus and subtitles.";
+        SettingRow("UI brightness", uiHelp);
+        ImGui::SliderInt("##ui", &g_bright.ui, 80, 1000, "%d nits", log);
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        Help(uiHelp);
+        ImGui::EndTable();
+    }
+    if (!g_bright.on) ImGui::EndDisabled();
+    if (changed) SaveBrightness();
 }
 
 // The user settings fields the peak goes through (Advanced).
@@ -1342,6 +1632,8 @@ void DrawHdrSettingsFields() {
         cvars::SafeCopy(&nits, settings + kHdrNits, 4);
         ImGui::Text("Game user settings: bUseHDRDisplayOutput %u, HDRDisplayOutputNits %d", flag, nits);
     }
+    if (int built = 0; g_timestamp == kKnownTimestamp && cvars::SafeCopy(&built, g_base + kSinkNitsRva, 4))
+        ImGui::Text("Tone curve built for %d nits", built);
 }
 
 // The switches of one group: label | controls | the renderer's value.
@@ -1383,28 +1675,44 @@ void DrawWatched(const char* id, const wchar_t* const* names, size_t count) {
     ImGui::EndTable();
 }
 
+// Testing switches and diagnostics (the Advanced tab).
+void DrawAdvanced();
+
 void DrawOverlay(effect_runtime*) {
     std::lock_guard lock(g_mutex);
-    ImGui::TextUnformatted(UDRT_PRODUCT " " UDRT_VERSION);
+    ImGui::TextDisabled(UDRT_PRODUCT " " UDRT_VERSION "  -  settings are saved and applied every time the game starts");
     if (!g_manager) {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Waiting for the game's console variables...");
+        ImGui::TextColored(kWarn, "Waiting for the game's console variables...");
         return;
     }
     if (g_timestamp != kKnownTimestamp)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "A different game build than the one analysed: see the log.");
+        ImGui::TextColored(kWarn, "A different game build than the one analysed: see the log.");
 
-    ImGui::SeparatorText("Ray tracing");
-    DrawRt();
+    if (!ImGui::BeginTabBar("##tabs")) return;
+    if (ImGui::BeginTabItem("Ray tracing")) {
+        DrawRt();
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Detail")) {
+        DrawDetail();
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("HDR")) {
+        DrawBrightness();
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Advanced")) {
+        DrawAdvanced();
+        ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+}
 
-    ImGui::SeparatorText("Detail");
-    DrawDetail();
-
-    ImGui::SeparatorText("HDR brightness");
-    DrawBrightness();
-
-    ImGui::Spacing();
-    if (!ImGui::CollapsingHeader("Advanced")) return;  // closed by default: testing and diagnostics
-    ImGui::TextDisabled("Session-only switches and readouts for testing. Nothing here is saved.");
+void DrawAdvanced() {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("Session-only switches and readouts for testing. Nothing here is saved; rows the saved "
+                        "settings control are locked.");
+    ImGui::PopTextWrapPos();
 
     ImGui::SeparatorText("HDR");
     ImGui::Text("Swap chain: %s, %s", FormatName(g_backBufferFormat), ColorSpaceName(g_colorSpace));
@@ -1430,8 +1738,7 @@ void DrawOverlay(effect_runtime*) {
         ImGui::TextDisabled("%u presents: %u draws, %u compute dispatches, %u BLAS / %u TLAS builds", g_lastPresents,
                             g_lastWork.draws, g_lastWork.dispatches, g_lastWork.blasBuilds, g_lastWork.tlasBuilds);
         if (g_lastDispatches.empty()) {
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "No rays dispatched (%u RT pipelines created so far)",
-                               g_rtPipelines);
+            ImGui::TextColored(kWarn, "No rays dispatched (%u RT pipelines created so far)", g_rtPipelines);
         } else if (ImGui::BeginTable("##rays", 3, ImGuiTableFlags_SizingFixedFit)) {
             ImGui::TableSetupColumn("count", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("00000 x").x);
             ImGui::TableSetupColumn("size", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("0000x0000").x);
@@ -1451,7 +1758,7 @@ void DrawOverlay(effect_runtime*) {
 
     ImGui::SeparatorText("Diagnostics");
     if (ImGui::Button("Snapshot cvars")) g_snapshotRequested = true;
-    ImGui::SetItemTooltip("Logs what changed since the last snapshot, e.g. after changing a game menu option.");
+    Help("Logs what changed since the last snapshot, e.g. after changing a game menu option.");
     ImGui::SameLine();
     ImGui::TextDisabled("%s", g_frames < kCensusFrame ? "census after 10 s" : g_status.c_str());
     if (g_layoutBad) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Layout check found mismatches: see the log.");
