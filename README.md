@@ -23,7 +23,7 @@ It has no effect in SDR. With it, the game's HDR brightness sliders do nothing; 
 
 ## The add-on
 
-**Version 1.0.0.** The overlay tab shows the two saved sections below; everything else is
+**Version 1.1.0.** The overlay tab shows the three saved sections below; everything else is
 under a collapsed **Advanced** header.
 
 **Ray tracing** (on by default, saved in `ReShade.ini`, applied at every start). Turn the
@@ -43,6 +43,20 @@ RT effect off.
 RT ambient occlusion is the game's own and works once its Ray Tracing option is on. In one
 test at 4K output, shadows on all lights, reflections everywhere and AO took the game from
 146 to 90 fps (before RT quality).
+
+**Detail** (on by default, saved in `ReShade.ini`, applied at every start):
+
+- **Texture streaming pool**: 3072 MB by default (the game uses 950 MB, which at 4K makes
+  textures stream at lower resolution). Keep it well under your card's memory: about 2048 MB
+  on an 8 GB card.
+- **16x anisotropic filtering** (the game uses 8x): sharper floors and walls at shallow
+  angles, nearly free.
+- **Shadow sharpness**: Game / **Sharp** (default): virtual shadow maps one resolution step
+  higher for the sun, moon, lamps and flashlights. Costs some performance.
+
+Not included, because there's nothing to gain: skin (subsurface scattering) is already at
+its maximum on the game's top shading preset, and sharpening is the game's own Image
+Sharpening slider (0-100; 35 is strong at 4K, try 10-20).
 
 **HDR brightness** (on by default, saved in `ReShade.ini`, applied at every start):
 
@@ -77,6 +91,9 @@ settings control are locked.
 - **Colour gamut** (`r.HDR.Display.ColorGamut`), **UI composite mode** (`r.HDR.UI.CompositeMode`).
 - **Calibration screen** (`r.HDRCalibrateScreen.Mode`, `.ShowGame`).
 - **UCP exposure** (`r.UCP.ExposureAdjust`) and **max luminance** (`r.UCP.HDR.BMMaxLuminanceOverride`).
+- **Texture streaming pool** (`r.Streaming.PoolSize`), **anisotropic filtering**
+  (`r.MaxAnisotropy`), **sun / local shadow resolution bias**
+  (`r.Shadow.Virtual.ResolutionLodBiasDirectional`, `...Local`).
 
 It also shows the swap chain's format and colour space, the renderer's values of the RT and
 HDR cvars, and the GPU work of the last second: draws, compute dispatches, acceleration
@@ -90,7 +107,7 @@ Copy `bin\UntilDawnTweaks.addon64` next to `Bates-Win64-Shipping.exe`
 carry over.
 
 ## Use
-Open ReShade (Home), go to the **UntilDawnTweaks** tab and set Ray tracing and HDR
+Open ReShade (Home), go to the **UntilDawnTweaks** tab and set Ray tracing, Detail and HDR
 brightness. Under **Advanced**, pick a value for a switch, or "Game" to hand it back.
 "Ray tracing work" lists the last second's DispatchRays calls by
 pipeline, so you can see which RT effects actually run (the game links its RT pipelines
@@ -107,3 +124,4 @@ Visual Studio 2022+ with the C++ x64 tools: `.\build.ps1`.
 |---|---|
 | `tools/pak.py` | List and extract files from the game's `.pak` (needs an Oodle DLL) |
 | `tools/syms.py` | Look up symbols and vtables in the game's PDB (via `llvm-pdbutil`) |
+| `tools/iostore.py` | List and extract files from the game's IoStore container (`.utoc`/`.ucas`), and print each texture's size and pixel format (needs an Oodle DLL) |

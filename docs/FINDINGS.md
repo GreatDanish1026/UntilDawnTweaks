@@ -248,3 +248,24 @@ every light and reflections at roughness 0.4, that shows as noise. The RT qualit
 forces 2 (High) or 4 (Ultra) rays per pixel for all three and 16 reconstruction samples for
 the shadow and reflection denoisers. Confirmed in game: the noise cleans up at an acceptable
 cost.
+
+## Textures, skin and detail (1.1.0)
+
+`tools/iostore.py` reads `Bates-Windows.utoc` (TOC version 5, compressed and indexed, not
+encrypted; 212,276 files) and each texture's cooked size and pixel format. The 8.4 GB `.pak`
+holds audio, configs and `AssetRegistry.bin`, not textures.
+
+- Character textures (2,659 under `Characters/`): 2,089 are 2048x2048, about 570 are 1024 or
+  smaller, one reports 4096 but ships only 2048 data. Colour, roughness and masks are BC1
+  (DXT1), normals BC5. Faces and heads are 2048 too.
+- `DefaultDeviceProfiles.ini` caps every texture LOD group (Character included) at
+  `MaxLODSize=2048`. The cook drops mips above that, so 4K sources (where they existed) are
+  not shipped: a 4K mod would have to upscale.
+- Skin: the game moves SSS into its own `ShadingQuality` scalability group; on the top preset
+  it is already at maximum (`r.SSS.Quality` 1, `HalfRes` 0, `SampleSet` 2, `Scale` 1,
+  `Burley.Quality` 1, `Checkerboard` 2 = automatic).
+- Sharpening: the menu's Image Sharpening (0-100) is `r.Tonemapper.Sharpen` × 10, written from
+  `UBatesGameUserSettings` +0x460 in `ApplyNonResolutionSettings` at priority 0x0a.
+- Headroom, live values: `r.Streaming.PoolSize` 950 MB (`LimitPoolSizeToVRAM` 0),
+  `r.MaxAnisotropy` 8, `r.Shadow.Virtual.ResolutionLodBias{Directional,Local}` 0. The Detail
+  settings raise these to 3072 MB, 16 and -1; confirmed in game to help at an acceptable cost.

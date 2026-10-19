@@ -176,6 +176,9 @@ const wchar_t* const kPrefixes[] = {
     L"r.Shadow.Virtual.Enable", L"r.Lumen.Reflections.Allow", L"r.Lumen.HardwareRayTracing", L"r.D3D12.DXR",
     L"r.SSR.Quality", L"r.AmbientOcclusion", L"r.Shadow.Denoiser", L"r.Reflections.Denoiser",
     L"r.HDR", L"r.UCP.", L"r.AllowHDR", L"r.Tonemapper",
+    L"r.SSS", L"r.SubsurfaceScattering", L"r.SkeletalMeshLODBias", L"r.Streaming.", L"r.MaxAnisotropy",
+    L"r.ContactShadows", L"r.Shadow.Virtual.ResolutionLodBias", L"r.FilmGrain", L"r.SceneColorFringe",
+    L"r.MotionBlurQuality", L"r.DepthOfFieldQuality",
 };
 
 std::vector<std::wstring> CollectNames() {
@@ -517,7 +520,7 @@ struct Choice {
     const char* label;
 };
 
-enum class Group { RayTracing, Hdr, Brightness };  // Brightness: driven by the HDR brightness sliders
+enum class Group { RayTracing, Hdr, Brightness, Detail };  // Brightness: driven by the HDR brightness sliders
 
 struct Override {
     Group group;
@@ -587,6 +590,19 @@ void DefineOverrides() {
         {Group::RayTracing, L"r.Reflections.Denoiser.ReconstructionSamples", "Reflection denoiser samples",
          "Samples the reflection denoiser's reconstruction pass takes. More smooths harder, at little cost. Ships 8.",
          {{8, "8"}, {16, "16"}}},
+        {Group::Detail, L"r.Streaming.PoolSize", "Texture streaming pool",
+         "Video memory (MB) for streamed textures. The game uses 950; when it is full, textures stream at lower "
+         "resolution and look soft.", {}, 512.0f, 8192.0f},
+        {Group::Detail, L"r.MaxAnisotropy", "Anisotropic filtering",
+         "Texture filtering at shallow angles (floors, walls). The game uses 8.",
+         {{4, "4x"}, {8, "8x"}, {16, "16x"}}},
+        {Group::Detail, L"r.Shadow.Virtual.ResolutionLodBiasDirectional", "Sun shadow resolution bias",
+         "Virtual shadow map resolution for the sun and moon. Lower is sharper and costs more. The game uses 0.",
+         {{0, "0"}, {-1, "-1"}, {-2, "-2"}}},
+        {Group::Detail, L"r.Shadow.Virtual.ResolutionLodBiasLocal", "Local shadow resolution bias",
+         "Virtual shadow map resolution for lamps and flashlights. Lower is sharper and costs more. The game "
+         "uses 0.",
+         {{0, "0"}, {-1, "-1"}, {-2, "-2"}}},
         {Group::RayTracing, L"r.Shadow.Virtual.Enable", "Virtual shadow maps",
          "UE's virtual shadow maps (the game holds them on from code). Turning them off tests whether they hide "
          "ray traced shadows.",
@@ -959,6 +975,55 @@ void ApplyRt() {
     Drive(L"r.Reflections.Denoiser.ReconstructionSamples", quality, 16.0f);
 }
 
+// ---------------------------------------------------------------- detail settings
+
+// Headroom the game leaves (its scalability presets, read live): a 950 MB texture streaming
+// pool, which at 4K makes textures stream at lower resolution; 8x anisotropic filtering; and
+// virtual shadow maps at resolution bias 0. Skin (SSS) is already at its maximum on the top
+// shading preset, and sharpening is the game's own Image Sharpening slider, so neither is here.
+
+enum DetailShadows : int { kShadowsGameRes = 0, kShadowsSharp = 1 };
+
+struct DetailSettings {
+    bool on = true;  // with nothing saved: on, at these defaults
+    int poolMb = 3072;
+    bool aniso16 = true;
+    int shadows = kShadowsSharp;
+    bool initialised = false;
+};
+DetailSettings g_detail;
+
+void SaveDetail() {
+    reshade::set_config_value(nullptr, kConfigSection, "DetailOverride", g_detail.on);
+    reshade::set_config_value(nullptr, kConfigSection, "DetailStreamingPoolMb", g_detail.poolMb);
+    reshade::set_config_value(nullptr, kConfigSection, "DetailAnisotropy16", g_detail.aniso16);
+    reshade::set_config_value(nullptr, kConfigSection, "DetailShadows", g_detail.shadows);
+}
+
+void InitDetail() {
+    g_detail.initialised = true;
+    bool saved = reshade::get_config_value(nullptr, kConfigSection, "DetailOverride", g_detail.on);
+    if (saved) {
+        reshade::get_config_value(nullptr, kConfigSection, "DetailStreamingPoolMb", g_detail.poolMb);
+        reshade::get_config_value(nullptr, kConfigSection, "DetailAnisotropy16", g_detail.aniso16);
+        reshade::get_config_value(nullptr, kConfigSection, "DetailShadows", g_detail.shadows);
+    }
+    g_detail.poolMb = std::clamp(g_detail.poolMb, 512, 8192);
+    Log("detail: %s, override %s: streaming pool %d MB, anisotropy %s, shadows %s",
+        saved ? "from ReShade.ini" : "defaults", g_detail.on ? "on" : "off", g_detail.poolMb,
+        g_detail.aniso16 ? "16x" : "game", g_detail.shadows == kShadowsSharp ? "sharp" : "game");
+}
+
+// Every frame, before ApplyOverrides.
+void ApplyDetail() {
+    if (!g_detail.initialised) InitDetail();
+    Drive(L"r.Streaming.PoolSize", g_detail.on, static_cast<float>(g_detail.poolMb));
+    Drive(L"r.MaxAnisotropy", g_detail.on && g_detail.aniso16, 16.0f);
+    bool sharp = g_detail.on && g_detail.shadows == kShadowsSharp;
+    Drive(L"r.Shadow.Virtual.ResolutionLodBiasDirectional", sharp, -1.0f);
+    Drive(L"r.Shadow.Virtual.ResolutionLodBiasLocal", sharp, -1.0f);
+}
+
 // ---------------------------------------------------------------- events
 
 constexpr uint64_t kCensusFrame = 600;  // ~10 s in: plugins have registered their cvars by then
@@ -1058,6 +1123,7 @@ void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t
     if (FindManager()) {
         ApplyBrightness();
         ApplyRt();
+        ApplyDetail();
         ApplyOverrides();
         if (g_frames % 60 == 0) CheckOverrides();
     }
@@ -1136,7 +1202,7 @@ void DrawOverride(Override& o) {
         return;
     }
     if (o.driven) {
-        ImGui::TextDisabled("set by the Ray tracing settings");
+        ImGui::TextDisabled(o.group == Group::Detail ? "set by the Detail settings" : "set by the Ray tracing settings");
         ImGui::TableNextColumn();
         ImGui::AlignTextToFramePadding();
         if (r.ok) ImGui::TextDisabled("renderer: %g", r.render);
@@ -1173,6 +1239,26 @@ void DrawOverride(Override& o) {
     ImGui::AlignTextToFramePadding();
     if (r.ok) ImGui::TextDisabled("renderer: %g", r.render);
     ImGui::PopID();
+}
+
+// Saved detail settings.
+void DrawDetail() {
+    bool changed = ImGui::Checkbox("Improve texture and shadow detail", &g_detail.on);
+    ImGui::SetItemTooltip("Kept in ReShade.ini and applied every time the game starts.");
+    if (!g_detail.on) ImGui::BeginDisabled();
+    ImGui::SliderInt("Texture streaming pool", &g_detail.poolMb, 512, 8192, "%d MB", ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SetItemTooltip("Video memory for streamed textures. The game uses 950 MB, which at 4K makes textures "
+                          "stream at lower resolution. Keep it well under your card's memory: about 2048 MB on an "
+                          "8 GB card, 3072-4096 MB on 12 GB or more.");
+    changed |= ImGui::Checkbox("16x anisotropic filtering", &g_detail.aniso16);
+    ImGui::SetItemTooltip("Sharper floors and walls at shallow angles (the game uses 8x). Nearly free.");
+    const char* shadows[] = {"Game", "Sharp"};
+    changed |= ImGui::Combo("Shadow sharpness", &g_detail.shadows, shadows, 2);
+    ImGui::SetItemTooltip("Sharp: virtual shadow maps one resolution step higher for the sun, moon, lamps and "
+                          "flashlights. Costs some performance.");
+    if (!g_detail.on) ImGui::EndDisabled();
+    if (changed) SaveDetail();
 }
 
 // Saved ray tracing settings.
@@ -1310,6 +1396,9 @@ void DrawOverlay(effect_runtime*) {
     ImGui::SeparatorText("Ray tracing");
     DrawRt();
 
+    ImGui::SeparatorText("Detail");
+    DrawDetail();
+
     ImGui::SeparatorText("HDR brightness");
     DrawBrightness();
 
@@ -1328,6 +1417,9 @@ void DrawOverlay(effect_runtime*) {
 
     ImGui::SeparatorText("Ray tracing");
     DrawSwitches(Group::RayTracing);
+
+    ImGui::SeparatorText("Detail");
+    DrawSwitches(Group::Detail);
 
     ImGui::SeparatorText("Ray tracing values (renderer's copy)");
     DrawWatched("##watched", kWatched, std::size(kWatched));
