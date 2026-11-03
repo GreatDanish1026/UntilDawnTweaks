@@ -1,16 +1,10 @@
-// Single source of the product name and version number (add-on, version resource).
+// Single source of the product name and version number.
 #pragma once
 
-#define UDRT_PRODUCT "UntilDawnTweaks"  // add-on name, log file prefix, ReShade.ini section
-#define UDRT_LEGACY_PRODUCT "UntilDawnRT"  // the name before 0.0.7: its add-on file and ini section
-#define UDRT_GAME "Until Dawn"
-#define UDRT_VERSION_MAJOR 1
-#define UDRT_VERSION_MINOR 1
-#define UDRT_VERSION_PATCH 0
-#define UDRT_VERSION "1.1.0"
-#define UDRT_RC_FILENAME "UntilDawnTweaks.addon64"
-#define UDRT_RC_PRODUCT "UntilDawnTweaks for Until Dawn"
-#define UDRT_RC_DESCRIPTION "UntilDawnTweaks ReShade add-on"
-
-// PE timestamp of the Bates-Win64-Shipping.exe whose PDB the layouts were read from.
-#define UDRT_KNOWN_PE_TIMESTAMP 0xcc7d6d54u
+#define DT_PRODUCT "UntilDawnTweaks"  // add-on name, log file name, ReShade.ini section
+#define DT_PRODUCT_W L"UntilDawnTweaks"
+#define DT_LEGACY_PRODUCT "UntilDawnRT"  // the name before 0.0.7: its ReShade.ini section
+#define DT_GAME "Until Dawn"
+#define DT_VERSION "1.2.0"
+// Bates-Win64-Shipping.exe whose PDB the HDR brightness offsets were read from.
+#define DT_KNOWN_PE_TIMESTAMP 0xcc7d6d54u

@@ -1,146 +1,99 @@
-# UntilDawnTweaks
+# UntilDawnTweaks 1.2.0
 
-(Formerly UntilDawnRT.) A ReShade add-on that makes ray tracing visible, and HDR work, in Until Dawn (2024 remake,
-Unreal Engine 5, DirectX 12). The game's ray tracing is compiled in and switched on, but its
-own settings keep it from showing: most lights opt out of RT shadows, and reflections are
-limited to mirror-like surfaces in curated areas. Turning HDR on shows the UI over a black
-scene. See [docs/FINDINGS.md](docs/FINDINGS.md).
+Graphics add-on for **Until Dawn** (2024 remake, PC, Steam), for ReShade with add-on support. It
+makes the game's ray tracing work, raises detail beyond what its menu offers, and replaces the
+HDR brightness sliders that stop working once HDR's black screen is fixed. Changes apply live,
+from an in-game overlay.
+
+- **Ray tracing fix**: the game's ray tracing is there, but its own settings keep it from
+  showing. Most lights opt out of ray traced shadows, and ray traced reflections only appear in
+  a few areas the designers marked, and only on mirror-like surfaces. UntilDawnTweaks gives
+  every light ray traced shadows (or only the lights marked "enhanced"), turns reflections on
+  everywhere, and lets them reach rougher surfaces (0.4; the game uses 0.01). The quality
+  presets leave this alone.
+- **Ray tracing quality**: the game traces 1 ray per pixel and leans on its denoisers, which
+  shows as noise. High traces 2 rays with stronger denoising, Ultra 4.
+- **Detail**: texture memory sized to your graphics card (the game's 950 MB makes textures
+  stream at lower resolution at 4K), 16x anisotropic filtering, sharper shadows, finer
+  volumetric fog and flashlight beams, Cinematic view distance and Cinematic effects (depth of
+  field, screen space reflections, translucency lighting). Most of it is the game's own
+  Cinematic tier, which its menu doesn't offer.
+- **Camera**: switches for depth of field, lens flares and vignette. Film grain, motion blur,
+  chromatic aberration and sharpening are in the game's own graphics menu, so they aren't here
+  (the game's Image Sharpening is strong at 4K: try 10-20).
+- **HDR brightness**: peak brightness, paper white and UI brightness, in nits.
+- **Quality presets**: *Ultra+* (High ray tracing quality, Ultra fog, sharp shadows and the
+  Detail options) and *Cinematic* (adds Ultra ray tracing quality and Cinematic shadows; about
+  30% slower than Game on an RTX 5080 at 4K). They leave the ray tracing fix, Camera and HDR
+  alone. **Measure preset costs** and **Measure each option** check them on your PC.
+- **F8** switches every tweak off and on, to compare.
+
+## Requirements
+
+- Until Dawn for PC (Steam version tested). If the game's code doesn't match, the add-on changes
+  nothing and says so in the overlay and in `UntilDawnTweaks.log`; HDR brightness needs the
+  tested game version.
+- [ReShade](https://reshade.me) 6.8 or newer **with full add-on support**, installed for
+  `Bates-Win64-Shipping.exe` with DirectX 12.
+- For ray tracing: a GPU with hardware ray tracing, and the game's own **Ray Tracing** option on
+  in its graphics menu (with it off, the game keeps every RT effect off; the Ray tracing tab says
+  so). RT reflections and RT ambient occlusion also follow their own menu options.
 
 ## HDR fix
 
-The black screen comes from the game's own HDR output path (its "Uniform Colour Pipeline").
-Unreal's standard HDR output works. To use it, add this to the game's `Engine.ini`, in
-`Documents\My Games\Bates\Saved\Config\Windows` (if Windows keeps your Documents in OneDrive,
-that is `OneDrive\Documents\My Games\...`; it is the folder that already has an `Engine.ini`):
+Turning HDR on shows the menus over a black game. The cause is the game's own HDR output path
+(its "Uniform Color Pipeline"); Unreal's standard HDR output works. To use it, add this to the
+game's `Engine.ini` in `Documents\My Games\Bates\Saved\Config\Windows` (if Windows keeps your
+Documents in OneDrive, `OneDrive\Documents\My Games\...`: the folder that already has an
+`Engine.ini`):
 
 ```ini
 [SystemSettings]
 r.UCP.HDR=0
 ```
 
-It has no effect in SDR. With it, the game's HDR brightness sliders do nothing; the add-on's
-**HDR brightness** sliders replace them.
-
-## The add-on
-
-**Version 1.1.0.** The overlay has four tabs: **Ray tracing**, **Detail** and **HDR** hold the
-saved settings (on by default, saved in `ReShade.ini`, applied every time the game starts);
-**Advanced** holds testing switches and diagnostics. Hover a setting's name for an
-explanation; Ray tracing and Detail have a **Reset to defaults** button.
-
-Many settings use the game's own **Cinematic** tier: values the developers tuned for this
-game (`DefaultScalability.ini`, "@Cine") that its graphics menu doesn't offer.
-
-**Ray tracing**. Turn the game's own **Ray Tracing** option on in its graphics menu: with it
-off, the game keeps every RT effect off (the tab says so).
-
-- **Shadows**: Game (few lights: most opt out of RT shadows) / Enhanced lights /
-  **All lights** (default). The most visible change, and the most costly.
-- **Reflections**: Game (only inside areas the designers marked, mirror-like surfaces only) /
-  **Everywhere** (default). Follows the game's RT reflections menu option.
-- **Reflection roughness**: 0.4 by default (the game uses 0.01). Higher reaches rougher
-  surfaces, costs more and can look noisier.
-- **Quality**: Game (1 ray per pixel) / **High** (default, 2) / Ultra (4), for RT shadows,
-  reflections and AO, with the shadow and reflection denoisers taking 16 reconstruction
-  samples instead of 8. Less noise; the cost of those effects goes up about as much.
-
-RT ambient occlusion is the game's own and works once its Ray Tracing option is on. In one
-test at 4K output, shadows on all lights, reflections everywhere and AO took the game from
-146 to 90 fps (before RT quality).
-
-**Detail**:
-
-- **Video card memory**: **Auto** (default, read from the graphics card) or 6 GB or less / 8 /
-  10 / 12 / 16 / 20 GB or more. Sets the texture streaming pool to about a quarter of it
-  (1024 / 2048 / 2560 / 3072 / 4096 / 6144 MB). The game uses 950 MB, which at 4K makes
-  textures stream at lower resolution.
-- **Texture filtering**: Game (8x) / **16x** (default): sharper floors and walls at shallow
-  angles, nearly free.
-- **Shadows**: Game / **Sharp** (default) / Cinematic. Sharp: virtual shadow maps one
-  resolution step higher for the sun, moon, lamps and flashlights, with the Cinematic tier's
-  8192 shadow pages so they don't run out (blur or flicker in patches). Cinematic: the game's
-  Cinematic shadows (sun -1.5, 16 soft-shadow rays with 8 samples). Costs the most.
-- **Fog**: Game (8 px cells, 128 slices) / **High** (default, 6 px) / Ultra (4 px, 192
-  slices, about 4x the game's fog work). Smoother volumetric fog and flashlight beams.
-- **View distance**: Game / **Cinematic** (default): view distance x2, mesh LOD distance 0.7,
-  foliage drawn down to 0.0001 of the screen. Less pop-in.
-- **Cinematic effects**: **on** (default): depth of field quality 4, screen space reflections
-  4, translucency lighting volume 128.
-
-Not included, because the game already covers them: skin (subsurface scattering) is at its
-maximum on the game's top shading preset; sharpening (Image Sharpening, 0-100; 35 is strong
-at 4K, try 10-20), film grain, motion blur and chromatic aberration are in its own menu.
-
-**HDR**:
-
-- **Peak brightness** (nits): set it to your display's peak. The game builds its tone curve
-  for 1000 nits otherwise.
-- **Paper white** (nits): overall scene brightness; sets 18 % grey to 0.18 × this.
-- **UI brightness** (nits): menus and subtitles.
-
-These start at the game's own values, so nothing changes until you move one.
-
-**Advanced**: session-only switches for testing, not saved; rows the saved settings control
-are locked.
-
-- **RT master switch** (`r.RayTracing.ForceAllRayTracingEffects`): what the menu's Ray Tracing
-  option sets (-1 on, 0 every RT effect off).
-- **RT ambient occlusion** (`r.RayTracing.AmbientOcclusion`).
-- **Enhanced RT mode** (`r.RayTracing.Enable.BMEnhancedMode`): 0 off, 1 lights marked
-  enhanced-only, 2 every light (the game warns this is very slow).
-- **Allow RT reflections** (`r.BM.AllowRTReflections`): 0 off, 1 where supported.
-- **RT reflections** (`r.RayTracing.Reflections`): the game holds it at 0.
-- **Reflections max roughness** (`r.RayTracing.Reflections.MaxRoughness`): the game uses 0.01.
-- **Shadow / reflection / AO rays per pixel** (`r.RayTracing.Shadows.SamplesPerPixel`,
-  `r.RayTracing.Reflections.SamplesPerPixel`, `r.RayTracing.AmbientOcclusion.SamplesPerPixel`;
-  -1 as shipped) and **shadow / reflection denoiser samples**
-  (`r.Shadow.Denoiser.ReconstructionSamples`, `r.Reflections.Denoiser.ReconstructionSamples`;
-  8 as shipped), to find which effect is noisy.
-- **Virtual shadow maps** (`r.Shadow.Virtual.Enable`): to test whether they hide RT shadows.
-- **Uniform Colour Pipeline HDR** (`r.UCP.HDR`): the game's own HDR output (on by default;
-  off fixes the black screen).
-- **Output device** (`r.HDR.Display.OutputDevice`): 3/4 ACES PQ, 5 scRGB, 11 UCP HDR (the game's
-  choice), 12 UCP scRGB, 0/10 SDR.
-- **Colour gamut** (`r.HDR.Display.ColorGamut`), **UI composite mode** (`r.HDR.UI.CompositeMode`).
-- **Calibration screen** (`r.HDRCalibrateScreen.Mode`, `.ShowGame`).
-- **UCP exposure** (`r.UCP.ExposureAdjust`) and **max luminance** (`r.UCP.HDR.BMMaxLuminanceOverride`).
-- **Texture streaming pool** (`r.Streaming.PoolSize`), **anisotropic filtering**
-  (`r.MaxAnisotropy`).
-- **Virtual shadow maps**: resolution bias for the sun (also while moving) and local lights
-  (`r.Shadow.Virtual.ResolutionLodBias*`), pages (`r.Shadow.Virtual.MaxPhysicalPages`), soft
-  shadow rays and samples (`r.Shadow.Virtual.SMRT.*`).
-- **Fog grid** (`r.VolumetricFog.GridPixelSize`, `GridSizeZ`), **view distance**
-  (`r.ViewDistanceScale`, `r.StaticMeshLODDistanceScale`, `foliage.MinimumScreenSize`),
-  **depth of field**, **SSR** and **translucency lighting** (`r.DepthOfFieldQuality`,
-  `r.SSR.Quality`, `r.TranslucencyLightingVolumeDim`).
-
-It also shows the swap chain's format and colour space, the HDR tone curve's peak, the
-renderer's values of the RT and HDR cvars, and the GPU work of the last second: draws, compute
-dispatches, acceleration structure builds and ray dispatches by pipeline.
+It has no effect in SDR. With it, the game's own HDR sliders do nothing; the HDR tab replaces
+them.
 
 ## Install
-Needs ReShade 6.8+ *with full add-on support* (works next to RenoDX).
-Copy `bin\UntilDawnTweaks.addon64` next to `Bates-Win64-Shipping.exe`
-(`Windows\Bates\Binaries\Win64`), or run `.\build.ps1 -Install`. Delete an older
-`UntilDawnRT.addon64` there if you have one (`build.ps1 -Install` does); its saved settings
-carry over.
 
-## Use
-Open ReShade (Home), go to the **UntilDawnTweaks** tab, and use its Ray tracing, Detail and
-HDR tabs. Under **Advanced**, pick a value for a switch, or "Game" to hand it back.
-"Ray tracing work" lists the last second's DispatchRays calls by
-pipeline, so you can see which RT effects actually run (the game links its RT pipelines
-with `AddToStateObject`, which ReShade doesn't report, so most show as unnamed). "Ray
-tracing values" shows the renderer's current values of the other RT cvars, and **Snapshot
-cvars** logs what changed since the last snapshot (e.g. after changing a menu option). The
-log, `UntilDawnTweaks.log`, is next to the exe.
+1. Install ReShade with add-on support into `...\Until Dawn\Windows\Bates\Binaries\Win64`.
+2. Copy `UntilDawnTweaks.addon64` into the same folder. Delete an older `UntilDawnRT.addon64`
+   there if you have one.
+3. Start the game and press **Home** to open ReShade. The settings are on the **Add-ons** tab,
+   under UntilDawnTweaks.
 
-## Build
-Visual Studio 2022+ with the C++ x64 tools: `.\build.ps1`.
+Settings are saved in `ReShade.ini` under `[UntilDawnTweaks]`; settings from 1.x carry over. A
+new install starts with the ray tracing fix on, the Ultra+ preset and HDR brightness at the
+game's own values. Nothing else is written to disk; deleting the `.addon64` file removes the mod
+(the two Engine.ini lines are the HDR fix: without them HDR is a black screen again).
 
-## Tools
+## Overlay
+
+- **Quality preset** at the top, with the frame time and the two measuring buttons.
+- **Ray tracing**: shadows, reflections, reflection roughness, quality, and whether the GPU is
+  tracing rays right now.
+- **Detail**: texture memory, filtering, shadows, fog, view distance, effects.
+- **Camera**: depth of field, lens flares, vignette (Game / Off).
+- **HDR**: HDR brightness (Game / Set here) with peak, paper white and UI sliders.
+- **Advanced**: status, a probe that writes every relevant setting to `UntilDawnTweaks-probe.txt`,
+  and a console variable field for experiments.
+
+`*` marks an option changed from the game's value; the **Game** choice shows the game's own
+value. Hover **(?)** for details. The log, `UntilDawnTweaks.log`, is next to the game's exe.
+
+## Building
+
+`.\build.ps1` builds `bin\UntilDawnTweaks.addon64` (needs Visual Studio 2022 with the C++
+tools). `.\build.ps1 -Install` also copies it into the game folder (close the game first),
+`-Package` makes the release zip. See `docs/FINDINGS.md` for how the game's settings were found.
+
 | Tool | What |
 |---|---|
 | `tools/pak.py` | List and extract files from the game's `.pak` (needs an Oodle DLL) |
 | `tools/syms.py` | Look up symbols and vtables in the game's PDB (via `llvm-pdbutil`) |
 | `tools/iostore.py` | List and extract files from the game's IoStore container (`.utoc`/`.ucas`), and print each texture's size and pixel format (needs an Oodle DLL) |
+
+## License
+
+MIT (see `LICENSE`). Third-party headers: see `THIRD_PARTY_NOTICES.txt`.

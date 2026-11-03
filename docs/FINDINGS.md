@@ -293,3 +293,49 @@ SMRT 16 rays x 8 samples vs 8 x 4; `ViewDistanceQuality@Cine` `r.ViewDistanceSca
   for 6 or less / 8 / 10 / 12 / 16 / 20+ GB.
 - Confirmed in game (RTX 5080, 4K): Sharp and Cinematic shadows, High and Ultra fog,
   Cinematic view distance and the Cinematic effects all look right at an acceptable cost.
+
+## 1.2.0: the Tweaks framework
+
+1.2.0 moved the add-on onto the HellbladeIITweaks 1.0.0 framework (the format of the other
+Tweaks add-ons): one combo per option with a Game choice, quality presets with in-game cost
+measuring, F8 to compare, a probe file, and every Set on the game thread.
+
+- **Game thread.** 1.x set cvars from ReShade's present thread and copied each value to the
+  renderer's copy itself. 1.2.0 hooks `IConsoleManager::CallAllConsoleVariableSinks` (vtable
+  +0x50; the PDB's `??_7FConsoleManager@@6B@` slot 10 confirms it for this build) through a
+  copy of the manager's vtable and sets everything there, before the sinks run.
+- **HDR brightness** on the game thread too: the peak still goes into
+  `GameUserSettings->HDRDisplayOutputNits` with `bUseHDRDisplayOutput` set while HDR output is
+  on; after writing them the add-on raises `bCallAllConsoleVariableSinks` so the HDR sink
+  rebuilds the tone curve in the same frame (1.x forced `r.HDR.Display.MaxLuminance` again
+  instead).
+- **RT reflections "Everywhere"** holds `r.RayTracing.Reflections` at the value of
+  `r.BM.AllowRTReflections` (the menu's RT Reflections option, read every second), as 1.x did.
+- **Presets.** The ray tracing fix (shadow lights, reflections, roughness) and HDR brightness are
+  in no preset: they fix the game rather than trade frame rate for quality. Ultra+ = 1.1's
+  defaults (RT quality High, texture memory Auto, 16x, Sharp shadows, High fog, Cinematic view
+  and effects); Cinematic = Ultra+ with RT quality Ultra, Cinematic shadows and Ultra fog.
+  Measured 2026-11-02 (RTX 5080, 4K, one scene, RT shadows on enhanced lights, reflections
+  everywhere): Game 8.44 ms (118 fps), Ultra+ 8.83 ms (113, +5%), Cinematic 10.94 ms (91,
+  +30%). "Measure each option" (Game 6.60 ms, about +-3% noise between runs): RT reflections
+  everywhere +14%, fog Ultra +10%, RT shadows on all lights +7%, shadows Cinematic +6%, fog
+  High +5%, RT quality Ultra +4%, texture memory, 16x, Sharp shadows, view distance and
+  Cinematic effects within noise. Ultra+ should land about midway (+15%), so it now takes Ultra
+  fog, the biggest of Cinematic's three extras; Cinematic adds RT quality Ultra and Cinematic
+  shadows. Not re-measured as presets after that change.
+- **Camera tab** (taste, in no preset, not measured): depth of field off
+  (`r.DepthOfFieldQuality` 0; listed after Detail so it wins over Cinematic effects' 4), lens
+  flares off (`r.LensFlareQuality` 0, game 2), vignette off (`r.Tonemapper.Quality` 1, game 5;
+  also drops Unreal's grain and film shadows). The probe shows the game already holds
+  `r.BloomQuality` at 0 (priority 0x0a), and chromatic aberration (`r.BM.ChromaticAberration`),
+  film grain, motion blur and sharpening are menu options, so none of those is here.
+- Test 2026-11-02: migration from 1.1 settings, game-thread hook (sinks flag +0xe0), RT reflections
+  following the menu option, HDR peak 3700 all worked; 21 values applied, none refused. The
+  Camera switches and F8 worked in the second test.
+- **Settings.** `SettingsVersion=2` in `[UntilDawnTweaks]`, one key per option (choice id).
+  Without it, the 1.x keys (`RtOverride`, `Detail*`, `HdrBrightnessOverride`, also from
+  `[UntilDawnRT]`) are turned into options once (group switch off = Game; roughness to the
+  nearest choice; fog 1/2 = 6/4 px; video memory row = its pool size, 0 = Auto). A new install
+  gets the ray tracing fix, Ultra+ and HDR brightness Set here.
+- Dropped from the overlay: the per-cvar switch tables, cvar snapshots and DispatchRays naming
+  by pipeline (development tools for 1.0; the probe and the console variable field replace them).
