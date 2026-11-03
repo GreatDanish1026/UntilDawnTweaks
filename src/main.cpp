@@ -420,14 +420,16 @@ struct QualityPreset {
 // RT reflections everywhere +14%, fog Ultra +10%, RT shadows all lights +7%, shadows Cinematic
 // +6%, fog High +5%, RT quality Ultra +4%, the rest within noise. Ultra+ should land about
 // midway (user's rule), so it now takes Ultra fog, the biggest of Cinematic's extras; Cinematic
-// adds Ultra RT quality and Cinematic shadows. Not re-measured as presets yet.
+// adds Ultra RT quality and Cinematic shadows. Re-measured (same scene): Game 8.44 ms (118 fps),
+// Ultra+ 9.75 ms (102, +16%), Cinematic 10.98 ms (91, +30%).
 const QualityPreset kPresets[] = {
     {"Game", "", "The game's own quality: everything in the presets at Game. The ray tracing fix\n"
                  "and HDR brightness stay as they are.", {}},
-    {"Ultra+", "",
+    {"Ultra+", "about 16% slower",
      "High ray tracing quality (2 rays), texture memory from your card, 16x filtering,\n"
      "sharp shadows, Ultra fog (the finest flashlight beams), Cinematic view distance and\n"
-     "effects.",
+     "effects.\n\n"
+     "Measured on an RTX 5080 at 4K in one scene: 118 fps with Game, 102 with Ultra+.",
      {{"RtQuality", 1}, {"TextureMemory", kPoolAuto}, {"Anisotropy", 16}, {"ShadowDetail", 1}, {"FogDetail", 4},
       {"ViewDistance", 1}, {"CinematicEffects", 1}}},
     {"Cinematic", "about 30% slower",

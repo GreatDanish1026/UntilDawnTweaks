@@ -23,8 +23,8 @@ from an in-game overlay.
   (the game's Image Sharpening is strong at 4K: try 10-20).
 - **HDR brightness**: peak brightness, paper white and UI brightness, in nits.
 - **Quality presets**: *Ultra+* (High ray tracing quality, Ultra fog, sharp shadows and the
-  Detail options) and *Cinematic* (adds Ultra ray tracing quality and Cinematic shadows; about
-  30% slower than Game on an RTX 5080 at 4K). They leave the ray tracing fix, Camera and HDR
+  Detail options; about 16% slower) and *Cinematic* (adds Ultra ray tracing quality and
+  Cinematic shadows; about 30% slower), measured against Game on an RTX 5080 at 4K. They leave the ray tracing fix, Camera and HDR
   alone. **Measure preset costs** and **Measure each option** check them on your PC.
 - **F8** switches every tweak off and on, to compare.
 

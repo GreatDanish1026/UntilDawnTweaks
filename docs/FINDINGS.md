@@ -322,7 +322,8 @@ measuring, F8 to compare, a probe file, and every Set on the game thread.
   High +5%, RT quality Ultra +4%, texture memory, 16x, Sharp shadows, view distance and
   Cinematic effects within noise. Ultra+ should land about midway (+15%), so it now takes Ultra
   fog, the biggest of Cinematic's three extras; Cinematic adds RT quality Ultra and Cinematic
-  shadows. Not re-measured as presets after that change.
+  shadows. Re-measured as presets (same scene): Game 8.44 ms (118 fps), Ultra+ 9.75 ms (102,
+  +16%), Cinematic 10.98 ms (91, +30%). User: the presets look good.
 - **Camera tab** (taste, in no preset, not measured): depth of field off
   (`r.DepthOfFieldQuality` 0; listed after Detail so it wins over Cinematic effects' 4), lens
   flares off (`r.LensFlareQuality` 0, game 2), vignette off (`r.Tonemapper.Quality` 1, game 5;
