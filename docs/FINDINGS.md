@@ -340,3 +340,46 @@ measuring, F8 to compare, a probe file, and every Set on the game thread.
   gets the ray tracing fix, Ultra+ and HDR brightness Set here.
 - Dropped from the overlay: the per-cvar switch tables, cvar snapshots and DispatchRays naming
   by pipeline (development tools for 1.0; the probe and the console variable field replace them).
+
+## DLSS Ray Reconstruction (1.3.0)
+
+The game ships NVIDIA's UE DLSS plugin (`Windows\Engine\Plugins\Marketplace\nvidia\DLSS`) and
+Streamline (DLSS-G), with DLSS-RR compiled in: `r.NGX.DLSS.DenoiserMode` ("1: DLSS-RR enabled"),
+`r.NGX.DLSS.BuiltInDenoiserOverride` (-1 automatic, 0 skip built-in denoising, 1 keep it),
+`FDLSSDenoiser` (wraps `GScreenSpaceDenoiser`), `FDLSSSceneViewFamilyUpscaler(DLSS-RR)`, and the
+RR guides (`DLSSDiffuseAlbedo`, `DLSSSpecularAlbedo`, `DLSSNormal`, `DLSSRoughness`, `DLSSDepth`).
+Only the runtime, `nvngx_dlssd.dll`, is missing. `r.NGX.DLSS.Preset` 0..7 = default, A..G (shared
+by SR, RR and DLAA).
+
+Why setting `r.NGX.DLSS.DenoiserMode=1` in Engine.ini only lasts until the main menu (PDB):
+
+- `UDLSSLibrary::EnableDLSS(bool)` (RVA 0x4002b00), which the game calls when it turns DLSS on,
+  sets `r.NGX.DLSS.Enable` (priority 0x09) and then tail-calls
+  `EnableDLSSRR(bDenoisingRequested)`. `bDenoisingRequested` (0x89d6fd2) is only set by
+  `EnableDLSSRR` itself, so it's false unless something asked for RR before.
+- `UDLSSLibrary::EnableDLSSRR(bool)` (0x4002c80): if DLSS is on and the requested state differs
+  from `DenoiserMode`: on, it saves `r.Shadow.Denoiser`, `r.Lumen.Reflections.ScreenSpaceReconstruction`
+  and `r.Lumen.Reflections.Temporal` and sets them 0, then `DenoiserMode` 1; off, it sets
+  `DenoiserMode` 0 and puts the saved values back (all at 0x0A; the saved values start as 1, so
+  the first off sets `r.Shadow.Denoiser` 1 although the game's is 2).
+- `FDLSSDenoiser::Denoise*` (shadows, AO, reflections, GI, sky light) first ask
+  `SkipDenoiser(view)` (0x4001c90): with RR active they hand the raw signal on, otherwise they
+  call the wrapped (Unreal) denoiser. Only signals routed through `GScreenSpaceDenoiser`
+  (`r.*.Denoiser 2`, the game's values) reach the wrapper; `r.Shadow.Denoiser 1` forces Unreal's
+  own and bypasses it.
+
+So the add-on holds `DenoiserMode 1` at console priority (0x0B), which the plugin's 0x0A sets
+can't override, plus `r.Shadow.Denoiser` 1 (On: Unreal denoises the RT shadows, RR the
+reflections and AO) or 2 (On, shadows too: RR gets the shadows undenoised; NVIDIA's own
+`EnableDLSSRR(true)` would set 0, no shadow denoising, which is the same once RR skips the
+wrapper). The preset is only held while RR is on.
+
+The plugin's `r.NGX.BinarySearchOrder` 0 looks in the project and launch folder before the
+plugin's own, so `nvngx_dlssd.dll` next to `Bates-Win64-Shipping.exe` is found (tested): the
+release zip is flat, the plugin folder stays untouched.
+
+NGX log files: launch option `-NGXLogFileEnable` writes
+`Saved\Logs\NGX\NGX_<date>\nvngx.log` (`Feature [SuperSamplingDenoising]` = RR,
+`[SuperSampling]` = SR; `ModelPreset` 6 = F, 11 = K). Tested 2026-11-10 on an RTX 5080 at 4K with
+DLSS frame generation: RR from the intro on, kept through the main menu, live On / On, shadows
+too / Off and model switching (the NVIDIA App's model override held F).

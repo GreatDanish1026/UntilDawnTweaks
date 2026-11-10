@@ -64,6 +64,25 @@ constexpr int kToggleHotkey = VK_F8;
 
 const uint8_t* GameBase() { return reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr)); }
 
+// NVIDIA's Ray Reconstruction runtime, which the game doesn't ship: next to the exe (the DLSS
+// plugin's "launch folder", searched first) or in the plugin's own folder. Checked every 2 s.
+bool RrRuntimeFound() {
+    static ULONGLONG last = 0;
+    static bool found = false;
+    if (last && GetTickCount64() - last < 2000) return found;
+    last = GetTickCount64();
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return found = false;
+    std::wstring dir(exe);
+    dir.resize(dir.find_last_of(L'\\') + 1);  // ...\Windows\Bates\Binaries\Win64\  .
+    found = GetFileAttributesW((dir + L"nvngx_dlssd.dll").c_str()) != INVALID_FILE_ATTRIBUTES ||
+            GetFileAttributesW((dir + L"..\\..\\..\\Engine\\Plugins\\Marketplace\\nvidia\\DLSS\\Binaries\\ThirdParty\\"
+                                      L"Win64\\nvngx_dlssd.dll")
+                                   .c_str()) != INVALID_FILE_ATTRIBUTES;
+    return found;
+}
+
 uint32_t PeTimestamp(const uint8_t* base) {
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     return reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew)->FileHeader.TimeDateStamp;
@@ -247,6 +266,31 @@ std::vector<Option> g_options = {
         {L"r.RayTracing.AmbientOcclusion.SamplesPerPixel", L"4"},
         {L"r.Shadow.Denoiser.ReconstructionSamples", L"16"},
         {L"r.Reflections.Denoiser.ReconstructionSamples", L"16"}}}}},
+    // The game ships NVIDIA's DLSS plugin with Ray Reconstruction built in, but not its runtime
+    // (nvngx_dlssd.dll), and its menu turns DLSS on through UDLSSLibrary::EnableDLSS, which also
+    // calls EnableDLSSRR(false) and sets r.NGX.DLSS.DenoiserMode to 0 at priority 0x0A. Held at
+    // console priority (0x0B) it stays on. With DenoiserMode 1 the plugin's denoiser wrapper hands
+    // every signal routed through it (r.*.Denoiser 2) to Ray Reconstruction undenoised;
+    // r.Shadow.Denoiser 1 keeps Unreal's own shadow denoiser (EnableDLSSRR(false) also sets it to
+    // 1). See docs/FINDINGS.md.
+    {kRayTracingTab, "DLSS Ray Reconstruction", "RayReconstruction", "Ray Reconstruction",
+     "NVIDIA's DLSS Ray Reconstruction (RTX cards) takes over from Unreal's denoisers for the\n"
+     "ray traced reflections and ambient occlusion, through the game's own NVIDIA DLSS plugin.\n"
+     "Needs DLSS as the upscaler in the game's menu, and nvngx_dlssd.dll (in the release zip).\n"
+     "On, shadows too: also hands it the RT shadows, undenoised (NVIDIA's own setup).\n"
+     "The game turns it off whenever it switches DLSS on; this keeps it on.",
+     L"r.NGX.DLSS.DenoiserMode",
+     {{"Off (game)", 0, {}},
+      {"On", 1, {{L"r.NGX.DLSS.DenoiserMode", L"1"}, {L"r.Shadow.Denoiser", L"1"}}},
+      {"On, shadows too", 2, {{L"r.NGX.DLSS.DenoiserMode", L"1"}, {L"r.Shadow.Denoiser", L"2"}}}}},
+    {kRayTracingTab, "DLSS Ray Reconstruction", "RrModel", "Ray Reconstruction model",
+     "Which Ray Reconstruction model NVIDIA's runtime uses (r.NGX.DLSS.Preset, only while Ray\n"
+     "Reconstruction is on). A model override in the NVIDIA App takes precedence.",
+     L"r.NGX.DLSS.Preset",
+     {{"NVIDIA default", 0, {}},
+      {"D", 4, {{L"r.NGX.DLSS.Preset", L"4"}}},
+      {"E", 5, {{L"r.NGX.DLSS.Preset", L"5"}}},
+      {"F", 6, {{L"r.NGX.DLSS.Preset", L"6"}}}}},
 
     // ------------------------------------------------ detail
     {kDetailTab, "Textures", "TextureMemory", "Texture memory",
@@ -390,6 +434,8 @@ std::map<std::wstring, std::wstring> Wanted() {
     for (const Option& o : g_options)
         if (const Choice* c = Chosen(o))
             for (auto& [key, value] : c->cvars) m[key] = value;
+    // The preset is shared with Super Resolution: only while Ray Reconstruction is on.
+    if (!OptionValue("RayReconstruction")) m.erase(L"r.NGX.DLSS.Preset");
     // The game's own gate also requires its RT Reflections menu option: keep that working.
     if (OptionValue("RtReflections")) m[L"r.RayTracing.Reflections"] = g_allowRtReflections.load() == 1 ? L"1" : L"0";
     if (OptionValue("TextureMemory") == kPoolAuto) m[L"r.Streaming.PoolSize"] = Number(kVram[AutoVramRow()].poolMb);
@@ -1102,6 +1148,7 @@ void GameTick() {
                 info.var ? cvars::Priority(info.var) : -1, info.var ? Callbacks(info.var) : 0,
                 Read(key, v) ? v.c_str() : L"(not found)");
         }
+        Log("Ray Reconstruction runtime (nvngx_dlssd.dll): %s", RrRuntimeFound() ? "found" : "not found");
     }
     if (dirty) Apply(std::move(want));
     Hold();
@@ -1488,6 +1535,9 @@ bool DrawTab(const View& view, const char* tab) {
             Note(&kWarn, "Ray Tracing is off in the game's graphics menu, so every RT effect is off. Turn it on there.");
         ImGui::TextDisabled("Ray tracing on the GPU now: %s (%llu ray dispatches per second)",
                             g_raysPerSec ? "yes" : "no", static_cast<unsigned long long>(g_raysPerSec));
+        if (OptionValue("RayReconstruction") && !RrRuntimeFound())
+            Note(&kWarn, "Ray Reconstruction needs nvngx_dlssd.dll next to the game's exe (from the release zip); "
+                         "without it DLSS keeps using Super Resolution.");
     }
     if (!strcmp(tab, kDetailTab))
         Note(nullptr, "Mostly the game's own Cinematic tier, which its menu doesn't offer.");

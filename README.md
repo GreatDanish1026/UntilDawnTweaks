@@ -1,4 +1,4 @@
-# UntilDawnTweaks 1.2.0
+# UntilDawnTweaks 1.3.0
 
 Graphics add-on for **Until Dawn** (2024 remake, PC, Steam), for ReShade with add-on support. It
 makes the game's ray tracing work, raises detail beyond what its menu offers, and replaces the
@@ -13,6 +13,14 @@ from an in-game overlay.
   presets leave this alone.
 - **Ray tracing quality**: the game traces 1 ray per pixel and leans on its denoisers, which
   shows as noise. High traces 2 rays with stronger denoising, Ultra 4.
+- **DLSS Ray Reconstruction** (RTX cards, off by default): the game ships NVIDIA's DLSS plugin
+  with Ray Reconstruction built in, but not its runtime, and its menu switches it off whenever
+  it turns DLSS on. UntilDawnTweaks brings the runtime (`nvngx_dlssd.dll` 310.9.16) and keeps it
+  on: NVIDIA's Ray Reconstruction then cleans up the ray traced reflections and ambient
+  occlusion in place of Unreal's denoisers (**On**), or the RT shadows too (**On, shadows
+  too**, NVIDIA's own setup). **Ray Reconstruction model**: NVIDIA's default, D, E or F; a
+  model override in the NVIDIA App takes precedence. Needs DLSS as the upscaler in the game's
+  menu.
 - **Detail**: texture memory sized to your graphics card (the game's 950 MB makes textures
   stream at lower resolution at 4K), 16x anisotropic filtering, sharper shadows, finer
   volumetric fog and flashlight beams, Cinematic view distance and Cinematic effects (depth of
@@ -58,21 +66,23 @@ them.
 ## Install
 
 1. Install ReShade with add-on support into `...\Until Dawn\Windows\Bates\Binaries\Win64`.
-2. Copy `UntilDawnTweaks.addon64` into the same folder. Delete an older `UntilDawnRT.addon64`
-   there if you have one.
+2. Copy `UntilDawnTweaks.addon64` and `nvngx_dlssd.dll` (NVIDIA's Ray Reconstruction runtime,
+   only used when Ray Reconstruction is on) into the same folder. Delete an older
+   `UntilDawnRT.addon64` there if you have one.
 3. Start the game and press **Home** to open ReShade. The settings are on the **Add-ons** tab,
    under UntilDawnTweaks.
 
 Settings are saved in `ReShade.ini` under `[UntilDawnTweaks]`; settings from 1.x carry over. A
 new install starts with the ray tracing fix on, the Ultra+ preset and HDR brightness at the
-game's own values. Nothing else is written to disk; deleting the `.addon64` file removes the mod
+game's own values. Nothing else is written to disk; deleting the `.addon64` file (and
+`nvngx_dlssd.dll`) removes the mod
 (the two Engine.ini lines are the HDR fix: without them HDR is a black screen again).
 
 ## Overlay
 
 - **Quality preset** at the top, with the frame time and the two measuring buttons.
-- **Ray tracing**: shadows, reflections, reflection roughness, quality, and whether the GPU is
-  tracing rays right now.
+- **Ray tracing**: shadows, reflections, reflection roughness, quality, DLSS Ray Reconstruction
+  and its model, and whether the GPU is tracing rays right now.
 - **Detail**: texture memory, filtering, shadows, fog, view distance, effects.
 - **Camera**: depth of field, lens flares, vignette (Game / Off).
 - **HDR**: HDR brightness (Game / Set here) with peak, paper white and UI sliders.
@@ -86,7 +96,9 @@ value. Hover **(?)** for details. The log, `UntilDawnTweaks.log`, is next to the
 
 `.\build.ps1` builds `bin\UntilDawnTweaks.addon64` (needs Visual Studio 2022 with the C++
 tools). `.\build.ps1 -Install` also copies it into the game folder (close the game first),
-`-Package` makes the release zip. See `docs/FINDINGS.md` for how the game's settings were found.
+`-Package` makes the release zip. Both need NVIDIA's signed `nvngx_dlssd.dll` 310.9.16 in
+`third_party\nvidia` (not in the repository; from the DLSS SDK or Streamline 2.14.16 `bin\x64`).
+See `docs/FINDINGS.md` for how the game's settings were found.
 
 | Tool | What |
 |---|---|
@@ -96,4 +108,4 @@ tools). `.\build.ps1 -Install` also copies it into the game folder (close the ga
 
 ## License
 
-MIT (see `LICENSE`). Third-party headers: see `THIRD_PARTY_NOTICES.txt`.
+MIT (see `LICENSE`). Third-party headers and NVIDIA's runtime: see `THIRD_PARTY_NOTICES.txt`.

@@ -3,8 +3,10 @@
 # Usage: .\build.ps1 [-Install] [-Package] [-GameBin <folder of Bates-Win64-Shipping.exe>]
 #   -Install  copies the add-on next to the game's exe (game closed) and removes the old
 #             UntilDawnRT.addon64 (both would load and fight over the same settings).
-#   -Package  makes bin\release\UntilDawnTweaks-<version>.zip: the add-on, README, LICENSE
-#             and THIRD_PARTY_NOTICES.
+#             It also copies NVIDIA's Ray Reconstruction runtime (third_party\nvidia\nvngx_dlssd.dll,
+#             310.9.16, not in the repository) next to the exe, where the game's DLSS plugin finds it.
+#   -Package  makes bin\release\UntilDawnTweaks-<version>.zip: the add-on, nvngx_dlssd.dll, README,
+#             LICENSE, THIRD_PARTY_NOTICES and UntilDawnTweaks-licenses\NVIDIA-DLSS-LICENSE.txt.
 param(
     [switch]$Install,
     [switch]$Package,
@@ -24,6 +26,7 @@ $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
 $obj = "$root\bin\obj"
 New-Item -ItemType Directory -Force $obj | Out-Null
 $addon = "$root\bin\UntilDawnTweaks.addon64"
+$dlssd = "$root\third_party\nvidia\nvngx_dlssd.dll"
 
 # ReShade add-on headers in third_party\reshade match ReShade 6.8.0.
 $cmd = @(
@@ -41,6 +44,8 @@ if ($Install) {
     if (-not (Test-Path "$GameBin\$exe")) { throw "$exe not found in $GameBin (pass -GameBin)" }
     if (Get-Process ([IO.Path]::GetFileNameWithoutExtension($exe)) -ErrorAction SilentlyContinue) { throw "Close the game first." }
     Copy-Item $addon $GameBin -Force
+    if (Test-Path $dlssd) { Copy-Item $dlssd $GameBin -Force }
+    else { Write-Warning "$dlssd missing: Ray Reconstruction runtime not installed" }
     Write-Host "Installed to $GameBin"
     if (Test-Path "$GameBin\$legacyName.addon64") {
         Remove-Item "$GameBin\$legacyName.addon64"
@@ -54,10 +59,13 @@ if ($Package) {
     $stage = "$root\bin\release\$name"
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force $stage | Out-Null
-    Copy-Item $addon, "$root\README.md", "$root\LICENSE", "$root\THIRD_PARTY_NOTICES.txt" $stage
+    if (-not (Test-Path $dlssd)) { throw "$dlssd missing (NVIDIA's signed nvngx_dlssd.dll 310.9.16)" }
+    Copy-Item $addon, $dlssd, "$root\README.md", "$root\LICENSE", "$root\THIRD_PARTY_NOTICES.txt" $stage
+    New-Item -ItemType Directory -Force "$stage\UntilDawnTweaks-licenses" | Out-Null
+    Copy-Item "$root\third_party\nvidia\NVIDIA-DLSS-LICENSE.txt" "$stage\UntilDawnTweaks-licenses"
     $zip = "$root\bin\release\$name.zip"
     if (Test-Path $zip) { Remove-Item -Force $zip }
     Compress-Archive -Path "$stage\*" -DestinationPath $zip
     Write-Host "Packaged $zip"
-    Get-ChildItem $stage -File | ForEach-Object { "{0,-36} {1,10:N0}" -f $_.Name, $_.Length }
+    Get-ChildItem $stage -File -Recurse | ForEach-Object { "{0,-36} {1,10:N0}" -f $_.Name, $_.Length }
 }

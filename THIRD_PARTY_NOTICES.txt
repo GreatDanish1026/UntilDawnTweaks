@@ -44,3 +44,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+----------------------------------------------------------------------------
+NVIDIA DLSS Ray Reconstruction runtime (nvngx_dlssd.dll 310.9.16)
+----------------------------------------------------------------------------
+The UntilDawnTweaks release zip redistributes NVIDIA's signed DLSS Ray
+Reconstruction runtime, nvngx_dlssd.dll 310.9.16 (from bin\x64 of NVIDIA's
+Streamline SDK 2.14.16 release), unmodified, under the NVIDIA RTX SDKs license
+(NVIDIA-DLSS-LICENSE.txt in the zip's UntilDawnTweaks-licenses folder). It is
+not part of the source repository; the license text is in
+third_party/nvidia/NVIDIA-DLSS-LICENSE.txt.
