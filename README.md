@@ -1,4 +1,4 @@
-# UntilDawnTweaks 1.3.0
+# UntilDawnTweaks 1.3.1
 
 Graphics add-on for **Until Dawn** (2024 remake, PC, Steam), for ReShade with add-on support. It
 makes the game's ray tracing work, raises detail beyond what its menu offers, and replaces the
@@ -8,9 +8,11 @@ from an in-game overlay.
 - **Ray tracing fix**: the game's ray tracing is there, but its own settings keep it from
   showing. Most lights opt out of ray traced shadows, and ray traced reflections only appear in
   a few areas the designers marked, and only on mirror-like surfaces. UntilDawnTweaks gives
-  every light ray traced shadows (or only the lights marked "enhanced"), turns reflections on
-  everywhere, and lets them reach rougher surfaces (0.4; the game uses 0.01). The quality
-  presets leave this alone.
+  ray traced shadows to the lights the developers marked for them ("Enhanced lights"), turns
+  reflections on everywhere, and lets them reach rougher surfaces (0.4; the game uses 0.01).
+  The quality presets leave this alone. *All lights (experimental)* gives every light RT
+  shadows: it's the game's hidden "Ultra" mode and can flicker or show artifacts on lights that
+  were never set up for them.
 - **Ray tracing quality**: the game traces 1 ray per pixel and leans on its denoisers, which
   shows as noise. High traces 2 rays with stronger denoising, Ultra 4.
 - **DLSS Ray Reconstruction** (RTX cards, off by default): the game ships NVIDIA's DLSS plugin
@@ -72,8 +74,9 @@ them.
 3. Start the game and press **Home** to open ReShade. The settings are on the **Add-ons** tab,
    under UntilDawnTweaks.
 
-Settings are saved in `ReShade.ini` under `[UntilDawnTweaks]`; settings from 1.x carry over. A
-new install starts with the ray tracing fix on, the Ultra+ preset and HDR brightness at the
+Settings are saved in `ReShade.ini` under `[UntilDawnTweaks]`; settings from 1.x carry over
+(1.3.1 moves ray traced shadows from All lights to Enhanced lights once; you can switch back). A
+new install starts with the ray tracing fix on (shadows on Enhanced lights), the Ultra+ preset and HDR brightness at the
 game's own values. Nothing else is written to disk; deleting the `.addon64` file (and
 `nvngx_dlssd.dll`) removes the mod
 (the two Engine.ini lines are the HDR fix: without them HDR is a black screen again).

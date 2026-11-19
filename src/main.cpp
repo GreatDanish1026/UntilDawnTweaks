@@ -226,12 +226,14 @@ std::vector<Option> g_options = {
     {kRayTracingTab, "Shadows", "RtShadowLights", "Ray traced shadows",
      "Which lights cast ray traced shadows. As shipped most lights opt out\n"
      "(r.RayTracing.Enable.BMEnhancedMode 0), so the game's RT shadows barely show.\n"
-     "Enhanced lights: also the lights marked for the enhanced mode.\n"
-     "All lights: every light. The most visible change, and the most costly.",
+     "Enhanced lights: also the lights the developers marked for ray traced shadows.\n"
+     "All lights (experimental): every light, including ones never set up for ray\n"
+     "traced shadows. It's the game's hidden \"Ultra\" mode, and it can flicker or show\n"
+     "artifacts on some lights. Costs a little more.",
      L"r.RayTracing.Enable.BMEnhancedMode",
      {{"Game (few lights)", 0, {}},
       {"Enhanced lights", 1, {{L"r.RayTracing.Enable.BMEnhancedMode", L"1"}}},
-      {"All lights", 2, {{L"r.RayTracing.Enable.BMEnhancedMode", L"2"}}}}},
+      {"All lights (experimental)", 2, {{L"r.RayTracing.Enable.BMEnhancedMode", L"2"}}}}},
     {kRayTracingTab, "Reflections", "RtReflections", "Ray traced reflections",
      "The game switches RT reflections on every frame only inside areas its designers\n"
      "marked. Everywhere keeps them on. Follows the game's RT Reflections menu option.",
@@ -521,7 +523,10 @@ void ApplyPreset(int index) {
 
 // ---------------------------------------------------------------- settings
 
-constexpr int kSettingsVersion = 2;  // 1.2.0: one key per option
+// 2 (1.2.0): one key per option. 3 (1.3.1): RT shadows on All lights moved to Enhanced lights
+// once (All lights showed artifacts on lights never set up for RT shadows); picking All lights
+// again afterwards is kept.
+constexpr int kSettingsVersion = 3;
 
 bool HasKey(const char* section, const char* key) {
     size_t size = 0;
@@ -553,10 +558,13 @@ void SetOption(const char* key, int value) {
 // 1.0/1.1 kept one on/off switch per group plus its settings ([UntilDawnTweaks], or
 // [UntilDawnRT] before the rename). Turns them into the options, so nothing changes on update.
 // With nothing saved: the ray tracing fix on, Ultra+ (1.1's defaults), HDR brightness Set here.
+// RT shadows default to Enhanced lights since 1.3.1: All lights (BMEnhancedMode 2, the game's
+// hidden "Ultra") showed artifacts on lights never set up for RT shadows (user report
+// 2026-11-19; Enhanced fixed it). Saved choices aren't changed.
 void MigrateOrDefault() {
     for (Option& o : g_options) o.value = 0;
     ApplyPreset(kDefaultPreset);
-    SetOption("RtShadowLights", 2);
+    SetOption("RtShadowLights", 1);
     SetOption("RtReflections", 1);
     SetOption("RtRoughness", 4);
     SetOption(kHdrKey, 1);
@@ -614,7 +622,7 @@ void MigrateOrDefault() {
 void LoadSettings() {
     int version = 0;
     reshade::get_config_value(nullptr, DT_PRODUCT, "SettingsVersion", version);
-    if (version < kSettingsVersion) {
+    if (version < 2) {
         MigrateOrDefault();
     } else {
         for (Option& o : g_options) {
@@ -622,6 +630,11 @@ void LoadSettings() {
             if (!Chosen(o)) o.value = 0;
         }
         if (HasKey(DT_PRODUCT, "HdrPeakNits")) LoadBrightness(DT_PRODUCT);
+    }
+    if (version < 3 && OptionValue("RtShadowLights") == 2) {
+        SetOption("RtShadowLights", 1);
+        Log("settings: ray traced shadows moved from All lights to Enhanced lights (1.3.1; All lights can show "
+            "artifacts)");
     }
     g_hdrPeak = std::clamp(g_hdrPeak, 400, 10000);
     g_hdrPaper = std::clamp(g_hdrPaper, 80, 500);

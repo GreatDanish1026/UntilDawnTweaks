@@ -383,3 +383,15 @@ NGX log files: launch option `-NGXLogFileEnable` writes
 `[SuperSampling]` = SR; `ModelPreset` 6 = F, 11 = K). Tested 2026-11-10 on an RTX 5080 at 4K with
 DLSS frame generation: RR from the intro on, kept through the main menu, live On / On, shadows
 too / Off and model switching (the NVIDIA App's model override held F).
+
+## RT shadows: All lights artifacts (1.3.1)
+
+User report 2026-11-19: RT shadows on All lights (`BMEnhancedMode` 2) show artifacts in motion;
+reproduced here (RTX 5080, 4K, cabin living room at night) and Enhanced lights (1) fixes it.
+Mode 2 is the game's own hidden menu level (`EBatesPCRaytracingEnhancedGraphicsMode` Ultra;
+the row is hidden, and the cvar's help warns "VERY SLOW"): it ignores each light's
+`CastRaytracedShadow`, so lights the artists left at Disabled (fill lights, lights inside lamp
+fittings) trace shadows they were never set up for. Not something one bias or denoiser setting
+fixes. 1.3.1: Enhanced lights is the default, All lights is labelled experimental, and
+`SettingsVersion` 3 moves saved All lights to Enhanced once. Screenshots (two stills 2 s apart)
+didn't show it clearly; it shows in motion.

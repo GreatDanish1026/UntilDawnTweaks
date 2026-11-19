@@ -19,6 +19,8 @@ $legacyName = "UntilDawnRT"  # the name before 0.0.7
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $env:PATH = "$(Split-Path $vswhere);$env:PATH"  # vcvars64.bat runs vswhere by name
+# A stray quote in a PATH entry (seen: `GitHub CLI"`) breaks vcvars64.bat; drop quotes for this build.
+$env:PATH = $env:PATH.Replace('"', '')
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) { throw "Visual Studio with the C++ x64 tools not found." }
 $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
